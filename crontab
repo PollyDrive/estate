@@ -1,0 +1,6 @@
+# RealtyBot-Bali cron schedule
+# Runs every hour at minute 0
+# Format: minute hour day month weekday command
+
+0 * * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
+# Empty line required at end of crontab file

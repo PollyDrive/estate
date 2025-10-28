@@ -111,23 +111,29 @@ SELECT COUNT(*) FROM fb_listings WHERE sent_to_telegram = true;
 
 ## Настройка расписания
 
-По умолчанию бот запускается **каждый час**. Чтобы изменить, отредактируйте `crontab`:
+**По умолчанию:** 4 раза в день (8:00, 12:00, 16:00, 20:00) — оптимально для Apify Free tier
+
+Это дает 120 запусков/месяц, что укладывается в бесплатные $5 Apify (~$4.80).
+
+**Для изменения расписания** отредактируйте `crontab`:
 
 ```bash
-# Каждый час (по умолчанию)
-0 * * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
+# 4 раза в день (рекомендуется для Free tier)
+0 8,12,16,20 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
 
-# Каждые 30 минут
-*/30 * * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
+# 3 раза в день (90 запусков/месяц)
+0 9,17,1 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
 
-# Каждые 2 часа
-0 */2 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
+# 2 раза в день (60 запусков/месяц)
+0 10,18 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
 ```
 
 После изменений:
 ```bash
 docker-compose up --build -d
 ```
+
+**⚠️ Внимание:** Запуск каждый час = 720 запусков/месяц (~$28) — требует платного плана Apify.
 
 ## Структура воронки фильтрации
 

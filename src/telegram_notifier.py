@@ -27,9 +27,7 @@ class TelegramNotifier:
         summary_ru: str,
         price: str,
         phone: Optional[str],
-        url: str,
-        msg_en: str,
-        msg_id: str
+        url: str
     ) -> bool:
         """
         Send notification to Telegram group.
@@ -39,8 +37,6 @@ class TelegramNotifier:
             price: Listing price
             phone: Phone number (if found)
             url: Listing URL
-            msg_en: English message template
-            msg_id: Indonesian message template
             
         Returns:
             True if sent successfully, False otherwise
@@ -54,9 +50,7 @@ class TelegramNotifier:
                 summary_ru=summary_ru,
                 price=price,
                 phone=phone_display,
-                url=url,
-                msg_en=msg_en,
-                msg_id=msg_id
+                url=url
             )
             
             # Send message via Telegram API

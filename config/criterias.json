@@ -1,0 +1,55 @@
+{
+  "search_areas": [
+    "Abiansemal",
+    "Singakerta",
+    "Mengwi"
+  ],
+  "listing_type": "For Rent",
+  "price_rules": [
+    {
+      "bedrooms": 1,
+      "min_price": 2000000,
+      "max_price": 6000000
+    },
+    {
+      "bedrooms": 2,
+      "min_price": 4000000,
+      "max_price": 14000000
+    }
+  ],
+  "hard_filters_python": {
+    "must_have_keywords": [
+      "kitchen",
+      "dapur"
+    ],
+    "stop_words": [
+      "daily",
+      "harian",
+      "weekly",
+      "mingguan",
+      "shared kitchen",
+      "dapur bersama",
+      "no kitchen",
+      "outdoor kitchen"
+    ]
+  },
+  "llm_filters": {
+    "must_haves": [
+      "AC",
+      "Wifi"
+    ],
+    "kitchen_type_preferred": [
+      "closed kitchen",
+      "enclosed kitchen",
+      "separate kitchen"
+    ],
+    "kitchen_type_acceptable": [
+      "indoor kitchen"
+    ],
+    "payment_term_preferred": "monthly",
+    "summary_points": [
+      "bills included/excluded",
+      "furniture status (fully/semi/unfurnished)"
+    ]
+  }
+}

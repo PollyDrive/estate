@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+Send all passed listings from final_listings to Telegram.
+Marks them as sent after successful delivery.
+"""
+
+import os
+import sys
+import logging
+import time
+from pathlib import Path
+from dotenv import load_dotenv
+import json
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+from database import Database
+from telegram_notifier import TelegramNotifier
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/telegram_send.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+def main():
+    """Send all passed listings to Telegram"""
+    
+    logger.info("=" * 80)
+    logger.info("SENDING PASSED LISTINGS TO TELEGRAM")
+    logger.info("=" * 80)
+    
+    # Load environment
+    load_dotenv()
+    
+    # Load config
+    config_path = Path(__file__).parent.parent / 'config' / 'config.json'
+    if not config_path.exists():
+        config_path = Path('/app/config/config.json')
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    
+    # Get credentials
+    db_url = os.getenv('DATABASE_URL')
+    telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    
+    if not all([db_url, telegram_token, telegram_chat_id]):
+        logger.error("Missing required environment variables!")
+        sys.exit(1)
+    
+    # Initialize Telegram notifier
+    telegram = TelegramNotifier(telegram_token, telegram_chat_id, config)
+    logger.info("✓ Telegram notifier initialized")
+    
+    # Get all passed listings that haven't been sent yet
+    with Database(db_url) as db:
+        query = """
+            SELECT 
+                fb_id, title, description, location, price,
+                phone_number, bedrooms, listing_url,
+                groq_reason, has_ac, has_wifi, has_pool,
+                kitchen_type, furniture, utilities, rental_term
+            FROM final_listings
+            WHERE groq_passed = true
+            AND sent_to_telegram = false
+            ORDER BY created_at ASC
+        """
+        db.cursor.execute(query)
+        columns = [desc[0] for desc in db.cursor.description]
+        listings = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
+    
+    if not listings:
+        logger.warning("No unsent passed listings found")
+        logger.info("All passed listings have already been sent to Telegram")
+        sys.exit(0)
+    
+    logger.info(f"Found {len(listings)} passed listings to send")
+    
+    # Send each listing to Telegram
+    sent_count = 0
+    failed_count = 0
+    
+    with Database(db_url) as db:
+        for idx, listing in enumerate(listings, 1):
+            fb_id = listing['fb_id']
+            title = listing.get('title') or 'Без названия'
+            description = listing.get('description') or ''
+            price = listing.get('price') or 'Не указана'
+            location = listing.get('location') or 'Не указана'
+            phone = listing.get('phone_number')
+            url = listing.get('listing_url') or f"https://www.facebook.com/marketplace/item/{fb_id}"
+            bedrooms = listing.get('bedrooms') or 'Не указано'
+            has_ac = listing.get('has_ac', False)
+            has_wifi = listing.get('has_wifi', False)
+            has_pool = listing.get('has_pool', False)
+            kitchen = listing.get('kitchen_type') or 'Не указано'
+            furniture = listing.get('furniture') or 'Не указано'
+            utilities = listing.get('utilities') or 'Не указано'
+            rental_term = listing.get('rental_term') or 'Не указано'
+            
+            logger.info(f"\n[{idx}/{len(listings)}] Sending {fb_id}: {title[:50]}...")
+            logger.info(f"  Location: {location}")
+            logger.info(f"  Price: {price}")
+            logger.info(f"  Bedrooms: {bedrooms}")
+            
+            # Create a simple Russian summary
+            summary_parts = []
+            summary_parts.append(f"📍 Локация: {location}")
+            summary_parts.append(f"🛏 Спален: {bedrooms}")
+            summary_parts.append(f"🍳 Кухня: {kitchen}")
+            
+            amenities = []
+            if has_ac:
+                amenities.append("❄️ AC")
+            if has_wifi:
+                amenities.append("📶 WiFi")
+            if has_pool:
+                amenities.append("🏊 Бассейн")
+            if amenities:
+                summary_parts.append(" | ".join(amenities))
+            
+            if furniture and furniture != 'Не указано':
+                summary_parts.append(f"🛋 Мебель: {furniture}")
+            
+            if utilities and utilities != 'Не указано':
+                summary_parts.append(f"💡 Коммуналка: {utilities}")
+            
+            summary_ru = "\n".join(summary_parts)
+            
+            # Add short description snippet if available
+            if description:
+                desc_preview = description[:200].strip()
+                if len(description) > 200:
+                    desc_preview += "..."
+                summary_ru += f"\n\n📝 {desc_preview}"
+            
+            # Send to Telegram
+            try:
+                success = telegram.send_notification(
+                    summary_ru=summary_ru,
+                    price=price,
+                    phone=phone,
+                    url=url
+                )
+                
+                if success:
+                    # Mark as sent in database
+                    db.cursor.execute("""
+                        UPDATE final_listings
+                        SET sent_to_telegram = true,
+                            telegram_sent_at = NOW()
+                        WHERE fb_id = %s
+                    """, (fb_id,))
+                    db.conn.commit()
+                    
+                    logger.info(f"  ✓ Sent successfully")
+                    sent_count += 1
+                    
+                    # Add delay between messages to avoid rate limits
+                    if idx < len(listings):
+                        time.sleep(2)
+                else:
+                    logger.error(f"  ✗ Failed to send")
+                    failed_count += 1
+                    
+            except Exception as e:
+                logger.error(f"  ✗ Error sending: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                failed_count += 1
+    
+    # Summary
+    logger.info("=" * 80)
+    logger.info("TELEGRAM SENDING COMPLETE")
+    logger.info(f"Total listings: {len(listings)}")
+    logger.info(f"Successfully sent: {sent_count}")
+    logger.info(f"Failed: {failed_count}")
+    logger.info("=" * 80)
+
+if __name__ == '__main__':
+    main()

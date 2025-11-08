@@ -63,7 +63,7 @@ class Level1Filter:
 class Level2Filter:
     """
     Level 2 filter: Paid LLM analysis using Claude 3 Haiku.
-    Generates summary and contact messages in multiple languages.
+    Generates a brief summary in Russian.
     """
     
     def __init__(self, config: Dict, api_key: str):
@@ -84,7 +84,7 @@ class Level2Filter:
         description: str
     ) -> Tuple[bool, Optional[Dict], str]:
         """
-        Analyze listing and generate summary and messages.
+        Analyze listing and generate summary.
         
         Args:
             title: Listing title
@@ -93,7 +93,7 @@ class Level2Filter:
             
         Returns:
             Tuple of (passed: bool, response_data: Optional[Dict], reason: str)
-            response_data contains: summary_ru, msg_en, msg_id
+            response_data contains: summary_ru
         """
         try:
             prompt = self.config['prompt_template'].format(
@@ -122,13 +122,12 @@ class Level2Filter:
                     json_str = response_text[json_start:json_end]
                     response_data = json.loads(json_str)
                     
-                    # Validate required fields
-                    required_fields = ['summary_ru', 'msg_en', 'msg_id']
-                    if all(field in response_data for field in required_fields):
+                    # Validate required field
+                    if 'summary_ru' in response_data:
                         logger.info("Level 2 filter: Analysis completed by Claude")
                         return True, response_data, "Analysis completed"
                     else:
-                        logger.error(f"Missing required fields in Claude response: {response_data}")
+                        logger.error(f"Missing summary_ru in Claude response: {response_data}")
                         return False, None, "Invalid response format"
                 else:
                     logger.error(f"No JSON found in Claude response: {response_text}")

@@ -9,6 +9,7 @@ class Level0Filter:
     """
     Level 0 filter: Hard filters using regex and keyword matching.
     Filters by price range, stop words, required words, and extracts phone numbers.
+    Supports dynamic price ranges based on number of bedrooms.
     """
     
     def __init__(self, config: Dict):
@@ -18,8 +19,10 @@ class Level0Filter:
         Args:
             config: Configuration dictionary with filter settings
         """
-        self.min_price = config['filters']['price']['min']
-        self.max_price = config['filters']['price']['max']
+        # Price rules by bedrooms (from criterias.json)
+        self.price_rules = config.get('criterias', {}).get('price_rules', [])
+        self.default_price = config.get('criterias', {}).get('default_price', {})
+        
         self.stop_words = [word.lower() for word in config['filters']['stop_words']]
         self.required_words = [word.lower() for word in config['filters']['required_words']]
         self.phone_patterns = [re.compile(pattern) for pattern in config['filters']['phone_regex']]
@@ -29,7 +32,7 @@ class Level0Filter:
         Extract numeric price from price string.
         
         Args:
-            price_str: Price string (e.g., "Rp 5,000,000")
+            price_str: Price string (e.g., "Rp 5,000,000", "IDR 4,500,000 per month")
             
         Returns:
             Price as integer or None if extraction fails
@@ -37,21 +40,81 @@ class Level0Filter:
         if not price_str:
             return None
         
-        # Remove common currency symbols and text
-        cleaned = re.sub(r'[Rp\s,.]', '', price_str)
+        # Extract only digits from the string
+        # This handles: "Rp5,000,000", "IDR 4,500,000 per month", "Rp 5.000.000", etc.
+        digits = re.findall(r'\d+', price_str)
         
-        try:
-            return int(cleaned)
-        except ValueError:
+        if not digits:
             logger.warning(f"Could not extract price from: {price_str}")
             return None
+        
+        # Join all digits (handles cases like "5,000,000" -> "5000000")
+        try:
+            price = int(''.join(digits))
+            return price
+        except ValueError:
+            logger.warning(f"Could not convert to int: {price_str}")
+            return None
     
-    def check_price_range(self, price_str: str) -> bool:
+    def extract_bedrooms(self, title: str, description: str) -> Optional[int]:
         """
-        Check if price is within acceptable range.
+        Extract number of bedrooms from title and description.
+        
+        Args:
+            title: Listing title
+            description: Listing description
+            
+        Returns:
+            Number of bedrooms or None if not found
+        """
+        text = f"{title} {description}".lower()
+        
+        # Patterns to match bedroom count
+        patterns = [
+            r'(\d+)\s*(?:bed(?:room)?s?|br|kamar)',
+            r'(?:bed(?:room)?s?|br|kamar)\s*[:\s]*(\d+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    bedrooms = int(match.group(1))
+                    logger.info(f"Found {bedrooms} bedroom(s)")
+                    return bedrooms
+                except (ValueError, IndexError):
+                    continue
+        
+        logger.info("Could not extract bedroom count")
+        return None
+    
+    def get_price_range(self, bedrooms: Optional[int]) -> Tuple[int, int]:
+        """
+        Get price range based on number of bedrooms.
+        
+        Args:
+            bedrooms: Number of bedrooms (or None)
+            
+        Returns:
+            Tuple of (min_price, max_price)
+        """
+        if bedrooms is not None:
+            # Find matching price rule
+            for rule in self.price_rules:
+                if rule['bedrooms'] == bedrooms:
+                    return (rule['min_price'], rule['max_price'])
+        
+        # Return default range if no match
+        return (self.default_price['min'], self.default_price['max'])
+    
+    def check_price_range(self, price_str: str, title: str = "", description: str = "") -> bool:
+        """
+        Check if price is within acceptable range based on bedrooms.
         
         Args:
             price_str: Price string
+            title: Listing title (optional, for bedroom detection)
+            description: Listing description (optional, for bedroom detection)
             
         Returns:
             True if price is in range, False otherwise
@@ -62,10 +125,19 @@ class Level0Filter:
             logger.warning(f"Price extraction failed for: {price_str}")
             return False
         
-        in_range = self.min_price <= price <= self.max_price
+        # Extract bedrooms and get appropriate price range
+        bedrooms = self.extract_bedrooms(title, description)
+        min_price, max_price = self.get_price_range(bedrooms)
+        
+        in_range = min_price <= price <= max_price
+        
+        if bedrooms:
+            logger.info(f"Price check for {bedrooms} BR: {price} IDR (range: {min_price}-{max_price} IDR)")
+        else:
+            logger.info(f"Price check (default): {price} IDR (range: {min_price}-{max_price} IDR)")
         
         if not in_range:
-            logger.info(f"Price {price} out of range ({self.min_price}-{self.max_price})")
+            logger.info(f"Price {price} out of range ({min_price}-{max_price})")
         
         return in_range
     
@@ -145,8 +217,8 @@ class Level0Filter:
         Returns:
             Tuple of (passed: bool, phone_number: Optional[str], reason: str)
         """
-        # Check price range
-        if not self.check_price_range(price):
+        # Check price range (now with bedroom-aware pricing)
+        if not self.check_price_range(price, title, description):
             return False, None, "Price out of range"
         
         # Check stop words

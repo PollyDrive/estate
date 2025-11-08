@@ -1,15 +1,24 @@
 # RealtyBot-Bali cron schedule
-# Optimized for Apify Free tier ($5 = ~120 runs/month)
-# 4 runs per day = 120 runs/month (fits perfectly in free tier)
-# Schedule: 8:00, 12:00, 16:00, 20:00 (excluding night hours 00:00-8:00)
-# Format: minute hour day month weekday command
+# 
+# ⚠️  AUTOMATIC EXECUTION DISABLED ⚠️
+# 
+# Bot runs MANUALLY ONLY to stay within Apify free tier limits
+# Use: docker-compose exec bot python3 /app/src/main.py
+# Or:  ./run_test.sh
+#
+# DO NOT UNCOMMENT THE LINES BELOW unless you have upgraded Apify plan
+# 
+# Apify Free tier: $5 credit = ~120 runs/month
+# If you want automatic runs, choose one schedule below:
 
-0 8,12,16,20 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
+# 4 runs per day (120 runs/month - maximum for free tier):
+# 0 8,12,16,20 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
 
-# Alternative schedules (uncomment one if needed):
-# Every 8 hours (3x/day = 90 runs/month): 0 9,17,1 * * *
-# Business hours only (4x/day): 0 9,13,17,21 * * *
-# Twice a day (2x/day = 60 runs/month): 0 10,18 * * *
+# 3 runs per day (90 runs/month - safer option):
+# 0 9,17,1 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
+
+# 2 runs per day (60 runs/month - conservative option):
+# 0 10,18 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
 
 # Empty line required at end of crontab file
 

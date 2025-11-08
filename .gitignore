@@ -3,6 +3,10 @@
 .env.local
 .env.*.local
 
+/docs
+
+backup.*
+
 # Python
 __pycache__/
 *.py[cod]
@@ -56,3 +60,8 @@ Thumbs.db
 
 # Project specific
 config.local.json
+
+# Cookies (contain sensitive auth data)
+cookies/*.txt
+!cookies/*.txt.example
+!cookies/.gitkeep

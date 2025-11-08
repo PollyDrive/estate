@@ -125,6 +125,8 @@
 4. Откройте в браузере (замените `<YOUR_TOKEN>` на токен бота):
    ```
    https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+
+
    ```
 5. Найдите в JSON-ответе:
    ```json

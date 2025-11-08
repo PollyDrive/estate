@@ -1,0 +1,154 @@
+{
+  "apify": {
+    "max_listings": 100,
+    "marketplace_urls": [
+      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?maxPrice=16000000&daysSinceListed=1"
+    ],
+    "search_areas": [
+      "Abiansemal",
+      "Singakerta",
+      "Mengwi"
+    ],
+    "enabled": true
+  },
+  "marketplace_cheerio": {
+    "enabled": true,
+    "marketplace_urls": [
+      "https://www.facebook.com/marketplace/item/1514733676311943"
+    ],
+    "include_seller": true,
+    "monitoring_mode": true,
+    "max_items": 100,
+    "max_stage2_items": 50,
+    "min_delay": 5,
+    "max_delay": 10,
+    "max_concurrency": 10,
+    "min_concurrency": 1,
+    "max_request_retries": 2,
+    "cookies_file": "/app/cookies/cookies_clean.txt",
+    "proxy": {
+      "useApifyProxy": true,
+      "apifyProxyGroups": ["RESIDENTIAL"]
+    }
+  },
+  "facebook_groups": {
+    "enabled": false,
+    "rate_limit_seconds": 30,
+    "max_posts_per_group": 15,
+    "cookies_file": "/app/cookies/cookies_clean.txt",
+    "groups": [
+      "balibidadarivillas",
+      "460364820648524",
+      "balihomerent",
+      "350448261731413",
+      "balimonthlyvillas"
+    ]
+  },
+  "criterias": {
+    "bedrooms_required": 2,
+    "default_price": {
+      "max": 16000000,
+      "currency": "IDR",
+      "note": "Maximum price for 2BR"
+    },
+    "allowed_locations": [
+      "Abiansemal",
+      "Singakerta",
+      "Mengwi",
+      "Ubud",
+      "Gianyar"
+    ]
+  },
+  "filters": {
+    "stop_words": [
+      "daily",
+      "harian",
+      "weekly",
+      "mingguan",
+      "посуточно",
+      "per day",
+      "per night",
+      "nightly",
+      "yearly",
+      "shared kitchen",
+      "dapur bersama",
+      "no kitchen",
+      "outdoor kitchen",
+      "Kuta",
+      "Di sewakan lapak jualan",
+      "Sewa toko",
+      "Uluwatu",
+      "Semarapura",
+      "Candi dasa",
+      "Besakih",
+      "Kintamani",
+      "Buleleng",
+      "Jimbaran",
+      "Nusa Dua",
+      "lovina",
+      "Singaraja",
+      "sanur",
+      "Amed",
+      "Seminyak",
+      "shop"
+    ],
+    "required_words": [
+      "kitchen",
+      "kitchenette",
+      "dapur"
+    ],
+    "phone_regex": [
+      "\\+?62\\s?8\\d{2}[\\s-]?\\d{3,4}[\\s-]?\\d{3,4}",
+      "08\\d{2}[\\s-]?\\d{3,4}[\\s-]?\\d{3,4}"
+    ]
+  },
+  "llm": {
+    "groq": {
+      "model": "llama-3.1-8b-instant",
+      "temperature": 0.1,
+      "max_tokens": 100,
+      "prompt_template": "You are a real estate assistant analyzing a rental listing. Answer only 'YES' or 'NO'.\n\nREQUIREMENTS (ALL must be met):\n- Must be FOR RENT (NOT for sale, NOT over kontrak, NOT dijual)\n- Must ONLY offer MONTHLY rental (NOT daily, NOT weekly, NOT yearly, NOT nightly, NOT daily+monthly, NOT monthly+yearly)\n- Must have proper kitchen (NOT outdoor kitchen, NOT shared kitchen, NOT no kitchen)\n- Must have AC\n- Must have WiFi\n- Monthly price must be 16,000,000 IDR or less (if price mentioned in description)\n- Must NOT be leasehold (NOT 'leasehold 5 years', NOT 'lease N years')\n- Must NOT offer multiple rental terms (must be monthly ONLY, not 'daily or monthly', not 'monthly or yearly')\n\nDescription: {description}\n\nDoes this listing meet ALL requirements? Answer YES or NO only."
+    },
+    "claude": {
+      "model": "claude-3-haiku-20240307",
+      "temperature": 0.3,
+      "max_tokens": 600,
+      "search_criteria": "long-term rental (monthly) in Bali with enclosed/indoor kitchen, AC, WiFi, in areas: Abiansemal, Singakerta, or Mengwi",
+      "must_haves": [
+        "AC",
+        "WiFi"
+      ],
+      "kitchen_preferences": {
+        "preferred": [
+          "closed kitchen",
+          "enclosed kitchen",
+          "separate kitchen"
+        ],
+        "acceptable": [
+          "indoor kitchen"
+        ],
+        "rejected": [
+          "outdoor kitchen",
+          "shared kitchen",
+          "no kitchen"
+        ]
+      },
+      "payment_term": "monthly",
+      "summary_points": [
+        "bills included/excluded",
+        "furniture status (fully/semi/unfurnished)",
+        "kitchen type",
+        "number of bedrooms"
+      ],
+      "prompt_template": "You are my Bali housing search assistant. I'm looking for: {criteria}\n\nAnalyze this listing:\n\nTitle: {title}\nPrice: {price}\nDescription: {description}\n\nWrite a brief summary in Russian (2-3 sentences) covering:\n- Kitchen type (enclosed/indoor/outdoor/shared)\n- Bills included or excluded\n- Furniture status (fully/semi/unfurnished)\n- Number of bedrooms\n- Any important notes\n\nIMPORTANT: Only proceed if the listing has:\n- Indoor/enclosed kitchen (NOT outdoor, NOT shared)\n- AC and WiFi mentioned\n- Monthly payment term\n\nRespond STRICTLY in JSON format:\n{{\"summary_ru\": \"...\"}}"
+    }
+  },
+  "telegram": {
+    "message_template": "🏡 *Новый вариант!*\n\n{summary_ru}\n\n💰 *Цена:* {price}\n📞 *Телефон:* {phone}\n🔗 *Ссылка:* {url}"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "logs/realty_bot.log"
+  }
+}

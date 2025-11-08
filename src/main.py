@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RealtyBot-Bali: Automated Facebook Marketplace scraper with multi-level filtering.
+RealtyBot-Bali: Main orchestrator for the multi-stage scraping and filtering process.
 """
 
 import os
@@ -10,206 +10,258 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-from database import Database
-from filters import Level0Filter
-from llm_filters import Level1Filter, Level2Filter
+from database import Database, STATUS_STAGE2_FILTERED, STATUS_STAGE2_REJECTED
+from property_parser import PropertyParser
 from telegram_notifier import TelegramNotifier
 from apify_scraper import ApifyScraper
+from facebook_marketplace_cheerio_scraper import FacebookMarketplaceCheerioScraper
+from llm_filters import get_llm_filters
 
 
 def setup_logging(config):
     """Setup logging configuration."""
-    log_config = config['logging']
-    log_dir = Path(log_config['file']).parent
+    log_config = config.get('logging', {})
+    log_file = log_config.get('file', 'logs/realty_bot.log')
+    log_dir = Path(log_file).parent
     log_dir.mkdir(parents=True, exist_ok=True)
     
     logging.basicConfig(
-        level=getattr(logging, log_config['level']),
-        format=log_config['format'],
+        level=getattr(logging, log_config.get('level', 'INFO')),
+        format=log_config.get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s'),
         handlers=[
-            logging.FileHandler(log_config['file']),
+            logging.FileHandler(log_file),
             logging.StreamHandler(sys.stdout)
         ]
     )
 
-
-def load_config(config_path='config.json'):
+def load_config(config_path='config/config.json'):
     """Load configuration from JSON file."""
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
+def run_stage1_scrape(config: dict, db: Database):
+    """
+    Stage 1: Scrape title-only listings from sources and save new ones to DB.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 80)
+    logger.info("PHASE 1: Starting Stage 1 (Initial Scrape)")
+    logger.info("=" * 80)
+
+    cheerio_enabled = config.get('marketplace_cheerio', {}).get('enabled', False)
+    if not cheerio_enabled:
+        logger.warning("Marketplace Cheerio scraping disabled, skipping Stage 1.")
+        return
+
+    apify_key = os.getenv('APIFY_API_KEY')
+    if not apify_key:
+        logger.error("APIFY_API_KEY not found, cannot run scraper.")
+        return
+
+    try:
+        cheerio_scraper = FacebookMarketplaceCheerioScraper(apify_key, config)
+        max_items = config.get('marketplace_cheerio', {}).get('max_items', 100)
+        
+        stage1_listings = cheerio_scraper.scrape_titles_only(max_items=max_items)
+        logger.info(f"[STAGE 1] Scraped {len(stage1_listings)} raw listings.")
+
+        new_listings_added = 0
+        for listing in stage1_listings:
+            # Here we can apply very basic title-only filters if needed before DB insert
+            # For now, we add all unique listings to the DB for processing.
+            # The user confirmed Apify/Cheerio does the initial title filtering.
+            was_added = db.add_listing_from_stage1(
+                fb_id=listing['fb_id'],
+                title=listing['title'],
+                price=listing.get('price', ''),
+                location=listing.get('location', ''),
+                listing_url=listing['listing_url'],
+                pass_reason="Initial scrape"
+            )
+            if was_added:
+                new_listings_added += 1
+        
+        logger.info(f"[STAGE 1] Added {new_listings_added} new unique listings to the database for processing.")
+
+    except Exception as e:
+        logger.error(f"Error during Stage 1 scraping: {e}", exc_info=True)
+
+
+def run_stage2_details_scrape(config: dict, db: Database):
+    """
+    Stage 2: Scrape full details for new listings and apply simple filters.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 80)
+    logger.info("PHASE 2: Starting Stage 2 (Detailed Scrape & Simple Filters)")
+    logger.info("=" * 80)
+
+    listings_to_process = db.get_listings_for_stage2()
+    if not listings_to_process:
+        logger.info("[STAGE 2] No new listings to process from Stage 1.")
+        return
+
+    logger.info(f"[STAGE 2] Found {len(listings_to_process)} listings requiring full details.")
+    
+    apify_key = os.getenv('APIFY_API_KEY')
+    if not apify_key:
+        logger.error("APIFY_API_KEY not found, cannot run scraper for Stage 2.")
+        return
+
+    parser = PropertyParser()
+    cheerio_scraper = FacebookMarketplaceCheerioScraper(apify_key, config)
+    
+    candidate_urls = [listing['listing_url'] for listing in listings_to_process]
+    max_stage2 = config.get('marketplace_cheerio', {}).get('max_stage2_items', 50)
+
+    try:
+        full_detail_listings = cheerio_scraper.scrape_full_details(candidate_urls, max_stage2_items=max_stage2)
+        logger.info(f"[STAGE 2] Scraped {len(full_detail_listings)} full-detail listings.")
+
+        for listing_details in full_detail_listings:
+            fb_id = listing_details.get('fb_id')
+            if not fb_id:
+                continue
+
+            full_text = f"{listing_details.get('title', '')} {listing_details.get('description', '')}"
+            params = parser.parse(full_text)
+            
+            criterias = config.get('criterias', {})
+            passed, reason = parser.matches_criteria(params, criterias)
+            
+            logger.info(f"[STAGE 2] Processing {fb_id}: Passed simple filters: {passed}. Reason: {reason}")
+
+            # Prepare details for DB update
+            update_details = {
+                'description': listing_details.get('description', ''),
+                'phone_number': (parser.extract_phone_numbers(full_text) or [None])[0],
+                'bedrooms': params.get('bedrooms'),
+                'price_extracted': params.get('price'),
+                'kitchen_type': params.get('kitchen_type'),
+                'has_ac': params.get('has_ac', False),
+                'has_wifi': params.get('has_wifi', False),
+                'has_pool': params.get('has_pool', False),
+                'has_parking': params.get('has_parking', False),
+                'utilities': params.get('utilities'),
+                'furniture': params.get('furniture'),
+                'rental_term': params.get('rental_term'),
+                'all_images': json.dumps(listing_details.get('all_images', [])),
+                'timestamp': listing_details.get('timestamp')
+            }
+            
+            db.update_listing_after_stage2(fb_id, update_details, passed)
+
+    except Exception as e:
+        logger.error(f"Error during Stage 2 processing: {e}", exc_info=True)
+
+
+def run_stage3_llm_analysis(config: dict, db: Database):
+    """
+    Stage 3: Run LLM analysis on listings that passed simple filters.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 80)
+    logger.info("PHASE 3: Starting Stage 3 (LLM Analysis)")
+    logger.info("=" * 80)
+
+    level1_filter, _ = get_llm_filters(config) # We only use Groq for now
+    if not level1_filter:
+        logger.warning("LLM filters are not enabled or configured. Skipping Stage 3.")
+        return
+
+    listings_to_analyze = db.get_listings_for_stage3()
+    if not listings_to_analyze:
+        logger.info("[STAGE 3] No new listings to analyze from Stage 2.")
+        return
+        
+    logger.info(f"[STAGE 3] Found {len(listings_to_analyze)} listings for LLM analysis.")
+
+    for listing in listings_to_analyze:
+        fb_id = listing['fb_id']
+        description = listing.get('description', '')
+        
+        if not description:
+            logger.warning(f"[STAGE 3] Listing {fb_id} has no description, cannot analyze. Marking as failed.")
+            db.update_listing_after_stage3(fb_id, False, "Missing description")
+            continue
+
+        logger.info(f"[STAGE 3] Analyzing {fb_id} with Groq...")
+        passed, reason = level1_filter.filter(description)
+        
+        logger.info(f"[STAGE 3] Analysis for {fb_id}: Passed: {passed}. Reason: {reason}")
+        db.update_listing_after_stage3(fb_id, passed, reason)
+
+
+def run_telegram_notifications(config: dict, db: Database, telegram: TelegramNotifier):
+    """
+    Final Phase: Send notifications for listings that passed all filters.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 80)
+    logger.info("PHASE 4: Sending Telegram Notifications")
+    logger.info("=" * 80)
+
+    listings_to_send = db.get_listings_for_telegram()
+    if not listings_to_send:
+        logger.info("No new listings to notify about.")
+        return
+
+    logger.info(f"Found {len(listings_to_send)} new listings to send to Telegram.")
+    sent_count = 0
+    for listing in listings_to_send:
+        fb_id = listing['fb_id']
+        
+        # Re-create a human-readable summary for the message
+        summary_ru = listing.get('groq_reason', 'Подходящий вариант') # Use Groq reason as a summary
+        price_display = listing.get('price', '')
+        if listing.get('price_extracted'):
+            price_display = f"Rp {listing['price_extracted']:,.0f}"
+
+        success = telegram.send_notification(
+            summary_ru=summary_ru,
+            price=price_display,
+            phone=listing.get('phone_number') or 'N/A',
+            url=listing.get('listing_url', '')
+        )
+        
+        if success:
+            logger.info(f"Successfully sent notification for {fb_id}.")
+            db.mark_listing_sent(fb_id)
+            sent_count += 1
+        else:
+            logger.error(f"Failed to send notification for {fb_id}.")
+    
+    logger.info(f"Sent {sent_count}/{len(listings_to_send)} notifications.")
+
 
 def main():
-    """Main execution function."""
-    # Load environment variables
+    """Main execution function to run all stages."""
     load_dotenv()
-    
-    # Load configuration
     config = load_config()
     setup_logging(config)
     
     logger = logging.getLogger(__name__)
-    logger.info("=" * 80)
-    logger.info("RealtyBot-Bali started")
-    logger.info("=" * 80)
+    logger.info("RealtyBot-Bali orchestrator started")
     
-    # Get credentials from environment
     db_url = os.getenv('DATABASE_URL')
-    apify_key = os.getenv('APIFY_API_KEY')
     telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
     telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-    groq_key = os.getenv('GROQ_API_KEY')
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
     
-    # Validate credentials
-    if not all([db_url, apify_key, telegram_token, telegram_chat_id, groq_key, anthropic_key]):
-        logger.error("Missing required environment variables!")
+    if not all([db_url, telegram_token, telegram_chat_id]):
+        logger.error("Missing required environment variables (DATABASE_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)!")
         sys.exit(1)
-    
-    # Initialize components
-    logger.info("Initializing components...")
-    scraper = ApifyScraper(apify_key, config)
-    level0_filter = Level0Filter(config)
-    level1_filter = Level1Filter(config, groq_key)
-    level2_filter = Level2Filter(config, anthropic_key)
+
+    # Initialize notifier once
     telegram = TelegramNotifier(telegram_token, telegram_chat_id, config)
-    
-    # Scrape listings
-    logger.info("Starting scraping process...")
-    raw_listings = scraper.scrape_listings()
-    logger.info(f"Scraped {len(raw_listings)} raw listings")
-    
-    if not raw_listings:
-        logger.warning("No listings found, exiting")
-        return
-    
-    # Process listings
-    processed_count = 0
-    new_count = 0
-    sent_count = 0
-    
+
+    # Use a single DB connection for the whole run
     with Database(db_url) as db:
-        for raw_listing in raw_listings:
-            processed_count += 1
-            
-            # Normalize listing
-            listing = scraper.normalize_listing(raw_listing)
-            fb_id = listing['fb_id']
-            
-            if not fb_id:
-                logger.warning(f"Listing has no ID, skipping")
-                continue
-            
-            logger.info(f"Processing listing {processed_count}/{len(raw_listings)}: {fb_id}")
-            
-            # Check if listing already exists
-            if db.listing_exists(fb_id):
-                logger.info(f"Listing {fb_id} already exists, skipping")
-                continue
-            
-            new_count += 1
-            logger.info(f"New listing found: {fb_id}")
-            
-            # Level 0: Hard filters
-            passed_l0, phone_number, reason = level0_filter.filter(
-                listing['title'],
-                listing['price'],
-                listing['description']
-            )
-            
-            if not passed_l0:
-                logger.info(f"Level 0 FAILED: {reason}")
-                db.insert_listing(
-                    fb_id=fb_id,
-                    title=listing['title'],
-                    price=listing['price'],
-                    location=listing['location'],
-                    listing_url=listing['listing_url'],
-                    description=listing['description'],
-                    phone_number=phone_number,
-                    sent_to_telegram=False
-                )
-                continue
-            
-            logger.info(f"Level 0 PASSED")
-            
-            # Level 1: Groq kitchen check
-            passed_l1, reason = level1_filter.filter(listing['description'])
-            
-            if not passed_l1:
-                logger.info(f"Level 1 FAILED: {reason}")
-                db.insert_listing(
-                    fb_id=fb_id,
-                    title=listing['title'],
-                    price=listing['price'],
-                    location=listing['location'],
-                    listing_url=listing['listing_url'],
-                    description=listing['description'],
-                    phone_number=phone_number,
-                    sent_to_telegram=False
-                )
-                continue
-            
-            logger.info(f"Level 1 PASSED")
-            
-            # Level 2: Claude analysis
-            passed_l2, analysis_data, reason = level2_filter.filter(
-                listing['title'],
-                listing['price'],
-                listing['description']
-            )
-            
-            if not passed_l2:
-                logger.info(f"Level 2 FAILED: {reason}")
-                db.insert_listing(
-                    fb_id=fb_id,
-                    title=listing['title'],
-                    price=listing['price'],
-                    location=listing['location'],
-                    listing_url=listing['listing_url'],
-                    description=listing['description'],
-                    phone_number=phone_number,
-                    sent_to_telegram=False
-                )
-                continue
-            
-            logger.info(f"Level 2 PASSED")
-            
-            # Send Telegram notification
-            success = telegram.send_notification(
-                summary_ru=analysis_data['summary_ru'],
-                price=listing['price'],
-                phone=phone_number,
-                url=listing['listing_url'],
-                msg_en=analysis_data['msg_en'],
-                msg_id=analysis_data['msg_id']
-            )
-            
-            if success:
-                sent_count += 1
-                logger.info(f"Telegram notification sent successfully")
-            else:
-                logger.error(f"Failed to send Telegram notification")
-            
-            # Save to database
-            db.insert_listing(
-                fb_id=fb_id,
-                title=listing['title'],
-                price=listing['price'],
-                location=listing['location'],
-                listing_url=listing['listing_url'],
-                description=listing['description'],
-                phone_number=phone_number,
-                sent_to_telegram=success
-            )
-    
-    # Summary
-    logger.info("=" * 80)
-    logger.info(f"Processing complete!")
-    logger.info(f"Total listings processed: {processed_count}")
-    logger.info(f"New listings: {new_count}")
-    logger.info(f"Notifications sent: {sent_count}")
-    logger.info("=" * 80)
+        run_stage1_scrape(config, db)
+        run_stage2_details_scrape(config, db)
+        run_stage3_llm_analysis(config, db)
+        run_telegram_notifications(config, db, telegram)
+
+    logger.info("RealtyBot-Bali run finished.")
 
 
 if __name__ == '__main__':

@@ -14,8 +14,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
-COPY config.json .
+COPY config/ ./config/
 COPY src/ ./src/
+
+# Copy cookies for Facebook Groups scraping
+COPY cookies/ ./cookies/
 
 # Create logs directory
 RUN mkdir -p logs

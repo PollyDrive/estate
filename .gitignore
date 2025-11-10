@@ -6,6 +6,8 @@
 /docs
 
 backup.*
+backup*.*
+apify_logs/
 
 # Python
 __pycache__/

@@ -24,6 +24,7 @@ class Level0Filter:
         self.default_price = config.get('criterias', {}).get('default_price', {})
         
         self.stop_words = [word.lower() for word in config['filters']['stop_words']]
+        self.stop_locations = [loc.lower() for loc in config['filters']['stop_locations']]
         self.required_words = [word.lower() for word in config['filters']['required_words']]
         self.phone_patterns = [re.compile(pattern) for pattern in config['filters']['phone_regex']]
     
@@ -143,20 +144,27 @@ class Level0Filter:
     
     def check_stop_words(self, title: str, description: str) -> bool:
         """
-        Check if listing contains any stop words.
+        Check if listing contains any stop words or stop locations.
         
         Args:
             title: Listing title
             description: Listing description
             
         Returns:
-            True if NO stop words found (pass), False if stop words found (fail)
+            True if NO stop words/locations found (pass), False if found (fail)
         """
         text = f"{title} {description}".lower()
         
+        # Check stop words
         for stop_word in self.stop_words:
             if stop_word in text:
                 logger.info(f"Stop word found: '{stop_word}'")
+                return False
+        
+        # Check stop locations
+        for stop_location in self.stop_locations:
+            if stop_location in text:
+                logger.info(f"Stop location found: '{stop_location}'")
                 return False
         
         return True

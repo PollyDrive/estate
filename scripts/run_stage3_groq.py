@@ -64,20 +64,18 @@ def main():
         logger.error(f"✗ Failed to initialize Groq filter: {e}")
         sys.exit(1)
     
-    # Get unprocessed listings (with description but not in final_listings yet)
-    with Database(db_url) as db:
+    # Get listings with status 'stage2' ready for Groq analysis
+    with Database() as db:
         query = """
-            SELECT fl.fb_id, fl.title, fl.description, fl.location, fl.price,
-                   fl.phone_number, fl.bedrooms, fl.price_extracted, fl.kitchen_type,
-                   fl.has_ac, fl.has_wifi, fl.has_pool, fl.has_parking,
-                   fl.utilities, fl.furniture, fl.rental_term, fl.listing_url, fl.source
-            FROM fb_listings fl
-            LEFT JOIN final_listings fin ON fl.fb_id = fin.fb_id
-            WHERE fl.source = 'marketplace'
-            AND fl.description IS NOT NULL 
-            AND fl.description != ''
-            AND fin.fb_id IS NULL
-            ORDER BY fl.created_at DESC
+            SELECT fb_id, title, description, location, price,
+                   phone_number, bedrooms, price_extracted, kitchen_type,
+                   has_ac, has_wifi, has_pool, has_parking,
+                   utilities, furniture, rental_term, listing_url, source
+            FROM listings
+            WHERE status = 'stage2'
+            AND description IS NOT NULL 
+            AND description != ''
+            ORDER BY created_at DESC
         """
         db.cursor.execute(query)
         columns = [desc[0] for desc in db.cursor.description]
@@ -95,7 +93,7 @@ def main():
     failed_count = 0
     error_count = 0
     
-    with Database(db_url) as db:
+    with Database() as db:
         for listing in listings:
             fb_id = listing['fb_id']
             description = listing['description']
@@ -109,18 +107,21 @@ def main():
             try:
                 passed, reason = groq_filter.filter(description)
                 
-                # Save to final_listings table
-                db.save_to_final_listings(
-                    listing_data=listing,
-                    groq_passed=passed,
-                    groq_reason=reason
+                # Update status based on Groq result
+                new_status = 'stage3' if passed else 'stage3_failed'
+                
+                # Save Groq analysis result to groq_reason field
+                db.cursor.execute(
+                    "UPDATE listings SET status = %s, groq_reason = %s WHERE fb_id = %s",
+                    (new_status, reason, fb_id)
                 )
+                db.conn.commit()
                 
                 if passed:
-                    logger.info(f"  ✓ PASSED: {reason}")
+                    logger.info(f"  ✓ PASSED: {reason} → status: stage3")
                     passed_count += 1
                 else:
-                    logger.info(f"  ✗ FILTERED: {reason}")
+                    logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
                     failed_count += 1
                     
             except Exception as e:
@@ -137,7 +138,8 @@ def main():
     logger.info(f"Filtered: {failed_count}")
     logger.info(f"Errors: {error_count}")
     logger.info("")
-    logger.info("Listings that passed Groq filter are ready for review/telegram")
+    logger.info("Listings with status 'stage3' are ready for Stage 4 (deduplication)")
+    logger.info("Command: python3 scripts/run_stage4.py")
     logger.info("=" * 80)
 
 if __name__ == '__main__':

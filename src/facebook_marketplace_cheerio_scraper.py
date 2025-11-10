@@ -392,7 +392,7 @@ class FacebookMarketplaceCheerioScraper:
             
             # Create normalized listing
             listing = {
-                'fb_id': f"cheerio_{listing_id}",
+                'fb_id': listing_id,
                 'source': 'marketplace_cheerio',
                 'group_id': None,
                 'title': title[:500] if title else '',

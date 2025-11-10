@@ -115,10 +115,9 @@ def main():
                 logger.info(f"  Title: {title[:50]}...")
                 logger.info(f"  Description: {len(description)} chars")
                 
-                # Parse full text for updated parameters
-                full_text = f"{title} {description}"
-                params = parser.parse(full_text)
-                phones = parser.extract_phone_numbers(full_text)
+                # Parse ONLY from description (title can be incorrect/outdated)
+                params = parser.parse(description)
+                phones = parser.extract_phone_numbers(description)
                 phone = phones[0] if phones else None
                 
                 logger.info(f"  BR={params.get('bedrooms')}, "

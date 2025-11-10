@@ -268,9 +268,11 @@ class PropertyParser:
                         price_str_clean = price_str.replace(',', '').replace('.', '')
                         price = float(price_str_clean)
                         
-                        # If resulting number is small (< 100), likely in millions
-                        if price < 100:
-                            price = price * 1_000_000
+                        # This logic was too ambiguous and caused errors.
+                        # A number like "17" was incorrectly interpreted as 17 million.
+                        # The logic now relies on explicit markers like "jt" or "juta".
+                        # if price < 100:
+                        #     price = price * 1_000_000
                     
                     return price
                 except (ValueError, IndexError):

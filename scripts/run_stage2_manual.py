@@ -62,28 +62,49 @@ def main():
     cheerio_scraper = FacebookMarketplaceCheerioScraper(apify_key, config)
     
     # Get unprocessed candidates from DB
-    with Database(db_url) as db:
-        listings_to_process = db.get_listings_for_stage2()
+    with Database() as db:
+        # Get all stage1 listings
+        query = "SELECT fb_id, listing_url, source, description FROM listings WHERE status IN ('stage1', 'stage1_new') ORDER BY created_at DESC"
+        db.cursor.execute(query)
+        columns = [desc[0] for desc in db.cursor.description]
+        listings_to_process = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
     
     if not listings_to_process:
-        logger.warning("No new listings with status 'stage1_new' found.")
+        logger.warning("No new listings with status 'stage1' or 'stage1_new' found.")
         sys.exit(0)
     
-    logger.info(f"Found {len(listings_to_process)} listings requiring full details.")
+    logger.info(f"Found {len(listings_to_process)} listings to process.")
     
-    # Extract URLs
-    candidate_urls = [c['listing_url'] for c in listings_to_process]
+    # Separate Groups with description vs. those needing scraping
+    groups_with_description = [l for l in listings_to_process if l['source'] == 'facebook_group' and l.get('description')]
+    groups_no_description = [l for l in listings_to_process if l['source'] == 'facebook_group' and not l.get('description')]
+    marketplace_listings = [l for l in listings_to_process if l['source'] in ('marketplace', 'apify', 'apify-marketplace', None, '')]
     
-    # STAGE 2: Scrape full details
-    max_stage2 = config.get('marketplace_cheerio', {}).get('max_stage2_items', 50)
-    logger.info(f"Scraping full details (max {max_stage2} items)...")
+    logger.info(f"  Groups with description: {len(groups_with_description)}")
+    logger.info(f"  Groups without description: {len(groups_no_description)}")
+    logger.info(f"  Marketplace listings: {len(marketplace_listings)}")
     
-    try:
-        stage2_listings = cheerio_scraper.scrape_full_details(candidate_urls, max_stage2_items=max_stage2)
-        logger.info(f"✓ Scraped {len(stage2_listings)} full listings")
-    except Exception as e:
-        logger.error(f"✗ Error scraping: {e}", exc_info=True)
-        sys.exit(1)
+    # Extract URLs for marketplace scraping
+    candidate_urls = [c['listing_url'] for c in marketplace_listings]
+    
+    # STAGE 2: Scrape full details for marketplace
+    stage2_listings = []
+    if candidate_urls:
+        max_stage2 = config.get('marketplace_cheerio', {}).get('max_stage2_items', 50)
+        logger.info(f"Scraping full details for marketplace (max {max_stage2} items)...")
+        
+        try:
+            stage2_listings = cheerio_scraper.scrape_full_details(candidate_urls, max_stage2_items=max_stage2)
+            logger.info(f"✓ Scraped {len(stage2_listings)} full listings")
+        except Exception as e:
+            logger.error(f"✗ Error scraping: {e}", exc_info=True)
+            # Don't exit, continue processing groups
+    
+    # Load detailed stop words
+    stop_words_detailed = config.get('filters', {}).get('stop_words_detailed', [])
+    stop_words_detailed_lower = [word.lower() for word in stop_words_detailed]
+    
+    logger.info(f"Loaded {len(stop_words_detailed)} detailed stop words for Stage 2")
     
     # Process and save
     logger.info("Processing and updating full listings in the database...")
@@ -91,7 +112,7 @@ def main():
     processed_count = 0
     updated_count = 0
     
-    with Database(db_url) as db:
+    with Database() as db:
         for listing_details in stage2_listings:
             processed_count += 1
             
@@ -100,45 +121,132 @@ def main():
                 logger.warning(f"Scraped listing missing fb_id, skipping.")
                 continue
             
-            # The fb_id from cheerio might have a prefix, let's assume it's clean for now
-            # as the new DB schema relies on a consistent fb_id.
+            description = listing_details.get('description', '')
             
-            # Parse full text
-            full_text = f"{listing_details.get('title', '')} {listing_details.get('description', '')}"
-            params = parser.parse(full_text)
+            # Check for detailed stop words in description
+            found_detailed_stop_word = None
+            if description and stop_words_detailed_lower:
+                description_lower = description.lower()
+                for stop_word in stop_words_detailed_lower:
+                    if stop_word in description_lower:
+                        found_detailed_stop_word = stop_word
+                        break
             
-            # Final criteria check
-            criterias = config.get('criterias', {})
-            passed, reason = parser.matches_criteria(params, criterias)
-            
-            logger.info(f"Processing {fb_id}: Passed simple filters: {passed}. Reason: {reason}")
+            # Determine status
+            if found_detailed_stop_word:
+                new_status = 'stage2_failed'
+                logger.info(f"  ✗ REJECTED {fb_id}: Detailed stop word '{found_detailed_stop_word}' found")
+            else:
+                # Parse ONLY from description (title can be incorrect/outdated)
+                params = parser.parse(description)
+                
+                # Final criteria check
+                criterias = config.get('criterias', {})
+                passed, reason = parser.matches_criteria(params, criterias)
+                
+                new_status = 'stage2' if passed else 'stage2_failed'
+                logger.info(f"Processing {fb_id}: Status '{new_status}'. Reason: {reason}")
 
             # Prepare details for DB update
             update_details = {
-                'description': listing_details.get('description', ''),
-                'phone_number': (parser.extract_phone_numbers(full_text) or [None])[0],
-                'bedrooms': params.get('bedrooms'),
-                'price_extracted': params.get('price'),
-                'kitchen_type': params.get('kitchen_type'),
-                'has_ac': params.get('has_ac', False),
-                'has_wifi': params.get('has_wifi', False),
-                'has_pool': params.get('has_pool', False),
-                'has_parking': params.get('has_parking', False),
-                'utilities': params.get('utilities'),
-                'furniture': params.get('furniture'),
-                'rental_term': params.get('rental_term'),
+                'description': description,
+                'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
+                'bedrooms': params.get('bedrooms') if 'params' in locals() else None,
+                'price_extracted': params.get('price') if 'params' in locals() else None,
+                'kitchen_type': params.get('kitchen_type') if 'params' in locals() else None,
+                'has_ac': params.get('has_ac', False) if 'params' in locals() else False,
+                'has_wifi': params.get('has_wifi', False) if 'params' in locals() else False,
+                'has_pool': params.get('has_pool', False) if 'params' in locals() else False,
+                'has_parking': params.get('has_parking', False) if 'params' in locals() else False,
+                'utilities': params.get('utilities') if 'params' in locals() else None,
+                'furniture': params.get('furniture') if 'params' in locals() else None,
+                'rental_term': params.get('rental_term') if 'params' in locals() else None,
                 'all_images': json.dumps(listing_details.get('all_images', [])),
-                'timestamp': listing_details.get('timestamp')
+                'timestamp': listing_details.get('timestamp'),
+                'status': new_status
             }
             
-            db.update_listing_after_stage2(fb_id, update_details, passed)
+            # Update in database
+            set_clause = ", ".join([f"{key} = %s" for key in update_details.keys()])
+            query = f"UPDATE listings SET {set_clause} WHERE fb_id = %s"
+            values = list(update_details.values())
+            values.append(fb_id)
+            
+            db.cursor.execute(query, tuple(values))
+            db.conn.commit()
             updated_count += 1
             
+        # Process Groups with description (already have it, just apply filters)
+        logger.info(f"\nProcessing {len(groups_with_description)} Groups with existing description...")
+        for listing in groups_with_description:
+            processed_count += 1
+            fb_id = listing['fb_id']
+            description = listing['description']
+            
+            # Check for detailed stop words in description
+            found_detailed_stop_word = None
+            if description and stop_words_detailed_lower:
+                description_lower = description.lower()
+                for stop_word in stop_words_detailed_lower:
+                    if stop_word in description_lower:
+                        found_detailed_stop_word = stop_word
+                        break
+            
+            # Determine status
+            if found_detailed_stop_word:
+                new_status = 'stage2_failed'
+                logger.info(f"  ✗ REJECTED {fb_id}: Detailed stop word '{found_detailed_stop_word}' found")
+            else:
+                # Parse ONLY from description (title can be incorrect/outdated)
+                params = parser.parse(description)
+                
+                # Final criteria check
+                criterias = config.get('criterias', {})
+                passed, reason = parser.matches_criteria(params, criterias)
+                
+                new_status = 'stage2' if passed else 'stage2_failed'
+                logger.info(f"  Processing {fb_id}: Status '{new_status}'. Reason: {reason}")
+            
+            # Prepare details for DB update
+            update_details = {
+                'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
+                'bedrooms': params.get('bedrooms') if 'params' in locals() else None,
+                'price_extracted': params.get('price') if 'params' in locals() else None,
+                'has_ac': params.get('has_ac', False) if 'params' in locals() else False,
+                'has_wifi': params.get('has_wifi', False) if 'params' in locals() else False,
+                'status': new_status
+            }
+            
+            # Update in database
+            set_clause = ", ".join([f"{key} = %s" for key in update_details.keys()])
+            query = f"UPDATE listings SET {set_clause} WHERE fb_id = %s"
+            values = list(update_details.values())
+            values.append(fb_id)
+            
+            db.cursor.execute(query, tuple(values))
+            db.conn.commit()
+            updated_count += 1
+        
+        # Process Groups without description
+        logger.info(f"\nProcessing {len(groups_no_description)} Groups without description...")
+        for listing in groups_no_description:
+            processed_count += 1
+            fb_id = listing['fb_id']
+            new_status = 'no_description'
+            logger.info(f"  ⚠ NO_DESC {fb_id}: Marked as 'no_description'")
+            
+            db.cursor.execute("UPDATE listings SET status = %s WHERE fb_id = %s", (new_status, fb_id))
+            db.conn.commit()
+            updated_count += 1
+    
     # Summary
     logger.info("=" * 80)
     logger.info("STAGE 2 COMPLETE")
     logger.info(f"Processed: {processed_count}")
     logger.info(f"Updated in DB: {updated_count}")
+    logger.info(f"  - Marketplace scraped: {len(stage2_listings)}")
+    logger.info(f"  - Groups with description: {len(groups_with_description)}")
+    logger.info(f"  - Groups without description (no_description): {len(groups_no_description)}")
     logger.info("=" * 80)
 
 if __name__ == '__main__':

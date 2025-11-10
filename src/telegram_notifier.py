@@ -22,6 +22,41 @@ class TelegramNotifier:
         self.message_template = config['telegram']['message_template']
         self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
+    def send_message(self, message: str) -> bool:
+        """
+        Send a pre-formatted message to Telegram.
+        
+        Args:
+            message: Pre-formatted message text
+            
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        try:
+            # Send message via Telegram API
+            payload = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': False
+            }
+            
+            response = requests.post(self.api_url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info(f"Telegram message sent successfully")
+                return True
+            else:
+                logger.error(f"Telegram API error: {response.status_code} - {response.text}")
+                return False
+                
+        except requests.RequestException as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error sending Telegram message: {e}")
+            return False
+    
     def send_notification(
         self,
         summary_ru: str,

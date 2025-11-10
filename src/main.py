@@ -75,8 +75,7 @@ def run_stage1_scrape(config: dict, db: Database):
                 title=listing['title'],
                 price=listing.get('price', ''),
                 location=listing.get('location', ''),
-                listing_url=listing['listing_url'],
-                pass_reason="Initial scrape"
+                listing_url=listing['listing_url']
             )
             if was_added:
                 new_listings_added += 1
@@ -123,8 +122,9 @@ def run_stage2_details_scrape(config: dict, db: Database):
             if not fb_id:
                 continue
 
-            full_text = f"{listing_details.get('title', '')} {listing_details.get('description', '')}"
-            params = parser.parse(full_text)
+            # Parse ONLY from description (title can be incorrect/outdated)
+            description = listing_details.get('description', '')
+            params = parser.parse(description)
             
             criterias = config.get('criterias', {})
             passed, reason = parser.matches_criteria(params, criterias)
@@ -133,8 +133,8 @@ def run_stage2_details_scrape(config: dict, db: Database):
 
             # Prepare details for DB update
             update_details = {
-                'description': listing_details.get('description', ''),
-                'phone_number': (parser.extract_phone_numbers(full_text) or [None])[0],
+                'description': description,
+                'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
                 'bedrooms': params.get('bedrooms'),
                 'price_extracted': params.get('price'),
                 'kitchen_type': params.get('kitchen_type'),

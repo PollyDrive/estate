@@ -1,63 +1,11 @@
 import json
 import logging
 import os
+import time
 from typing import Dict, Optional, Tuple
-from groq import Groq
 from anthropic import Anthropic
 
 logger = logging.getLogger(__name__)
-
-
-class Level1Filter:
-    """
-    Level 1 filter: Free LLM filter using Groq (Llama 3).
-    Confirms presence of kitchen suitable for cooking.
-    """
-    
-    def __init__(self, config: Dict, api_key: str):
-        """
-        Initialize Level 1 filter with Groq API.
-        
-        Args:
-            config: Configuration dictionary
-            api_key: Groq API key
-        """
-        self.config = config['llm']['groq']
-        self.client = Groq(api_key=api_key)
-    
-    def filter(self, description: str) -> Tuple[bool, str]:
-        """
-        Check if listing has a kitchen using Groq LLM.
-        
-        Args:
-            description: Listing description
-            
-        Returns:
-            Tuple of (passed: bool, reason: str)
-        """
-        try:
-            prompt = self.config['prompt_template'].format(description=description)
-            
-            response = self.client.chat.completions.create(
-                model=self.config['model'],
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.config['temperature'],
-                max_tokens=self.config['max_tokens']
-            )
-            
-            answer = response.choices[0].message.content.strip().upper()
-            
-            if 'YES' in answer:
-                logger.info("Level 1 filter: Kitchen confirmed by Groq")
-                return True, "Kitchen confirmed"
-            else:
-                logger.info("Level 1 filter: No kitchen found by Groq")
-                return False, "No kitchen confirmed"
-                
-        except Exception as e:
-            logger.error(f"Groq API error: {e}")
-            # In case of error, pass to next level to avoid false negatives
-            return True, f"Groq error (passed): {str(e)}"
 
 
 class Level2Filter:

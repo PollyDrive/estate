@@ -9,8 +9,8 @@ services:
       POSTGRES_USER: realty_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data_final:/var/lib/postgresql/data
+      # - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5434:5432"
     healthcheck:
@@ -27,7 +27,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://realty_user:${POSTGRES_PASSWORD}@postgres:5432/realty_bot
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       APIFY_API_KEY: ${APIFY_API_KEY}
       USE_REAL_APIFY: ${USE_REAL_APIFY}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
@@ -42,4 +46,4 @@ services:
     restart: unless-stopped
 
 volumes:
-  postgres_data:
+  postgres_data_final:

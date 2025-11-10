@@ -89,7 +89,6 @@ def main():
         passed, reason = parser.matches_criteria(params, criterias)
         
         if passed:
-            listing['pass_reason'] = reason
             candidates.append(listing)
             logger.info(f"  ✓ CANDIDATE: {fb_id} - {reason}")
         else:
@@ -106,14 +105,14 @@ def main():
         with Database(db_url) as db:
             for candidate in candidates:
                 try:
-                    # Use the new method to add listings with 'stage1_new' status
+                    # Use the new method to add listings with 'stage1' status
                     was_added = db.add_listing_from_stage1(
                         fb_id=candidate['fb_id'],
                         title=candidate['title'],
                         price=candidate.get('price', ''),
                         location=candidate.get('location', ''),
                         listing_url=candidate['listing_url'],
-                        pass_reason=candidate.get('pass_reason', '')
+                        source='apify-marketplace'
                     )
                     if was_added:
                         saved_count += 1

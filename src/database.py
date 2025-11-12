@@ -76,19 +76,20 @@ class Database:
         location: str,
         listing_url: str,
         source: str = 'apify-marketplace',
-        group_id: str = None
+        group_id: str = None,
+        description: str = None
     ) -> bool:
         """
         Adds a new listing from the initial scrape (Stage 1).
         If the listing already exists, it does nothing.
         """
         query = """
-            INSERT INTO listings (fb_id, title, price, location, listing_url, status, source, group_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO listings (fb_id, title, price, location, listing_url, status, source, group_id, description)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (fb_id) DO NOTHING
         """
         try:
-            self.cursor.execute(query, (fb_id, title, price, location, listing_url, STATUS_STAGE1, source, group_id))
+            self.cursor.execute(query, (fb_id, title, price, location, listing_url, STATUS_STAGE1, source, group_id, description))
             self.conn.commit()
             inserted_count = self.cursor.rowcount
             if inserted_count > 0:

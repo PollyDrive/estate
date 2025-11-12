@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-STAGE 3: Groq LLM Analysis for saved listings
-Analyzes descriptions with Groq (free) to check if listing matches criteria.
+STAGE 3: Zhipu LLM Analysis for saved listings
+Analyzes descriptions with Zhipu GLM-4 to check if listing matches criteria.
 Updates fb_listings with analysis results.
 """
 
@@ -16,14 +16,14 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from database import Database
-from llm_filters import Level1Filter
+from llm_filters import ZhipuFilter
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/stage3_groq.log'),
+        logging.FileHandler('logs/stage3_zhipu.log'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -31,10 +31,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def main():
-    """Run Stage 3: Groq LLM analysis for unprocessed listings"""
+    """Run Stage 3: Zhipu LLM analysis for unprocessed listings"""
     
     logger.info("=" * 80)
-    logger.info("STAGE 3: Groq LLM Analysis")
+    logger.info("STAGE 3: Zhipu GLM-4 Analysis")
     logger.info("=" * 80)
     
     # Load environment
@@ -50,18 +50,18 @@ def main():
     
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
-    groq_api_key = os.getenv('GROQ_API_KEY')
+    zhipu_api_key = os.getenv('ZHIPU_API_KEY')
     
-    if not all([db_url, groq_api_key]):
-        logger.error("Missing required environment variables (DATABASE_URL, GROQ_API_KEY)!")
+    if not all([db_url, zhipu_api_key]):
+        logger.error("Missing required environment variables (DATABASE_URL, ZHIPU_API_KEY)!")
         sys.exit(1)
     
-    # Initialize Groq filter
+    # Initialize Zhipu filter
     try:
-        groq_filter = Level1Filter(config, groq_api_key)
-        logger.info("✓ Groq filter initialized")
+        zhipu_filter = ZhipuFilter(config, zhipu_api_key)
+        logger.info("✓ Zhipu filter initialized")
     except Exception as e:
-        logger.error(f"✗ Failed to initialize Groq filter: {e}")
+        logger.error(f"✗ Failed to initialize Zhipu filter: {e}")
         sys.exit(1)
     
     # Get listings with status 'stage2' ready for Groq analysis
@@ -103,14 +103,14 @@ def main():
             logger.info(f"\nAnalyzing {fb_id}: {title[:50] if title else 'No title'}...")
             logger.info(f"  Location: {location}")
             
-            # Run Groq analysis
+            # Run Zhipu analysis
             try:
-                passed, reason = groq_filter.filter(description)
+                passed, reason = zhipu_filter.filter(description)
                 
-                # Update status based on Groq result
+                # Update status based on Zhipu result
                 new_status = 'stage3' if passed else 'stage3_failed'
                 
-                # Save Groq analysis result to groq_reason field
+                # Save Zhipu analysis result to groq_reason field (keep column name for compatibility)
                 db.cursor.execute(
                     "UPDATE listings SET status = %s, groq_reason = %s WHERE fb_id = %s",
                     (new_status, reason, fb_id)

@@ -24,7 +24,7 @@ class FacebookGroupScraper:
         self.client = ApifyClient(api_key)
         self.config = config.get('facebook_groups', {})
     
-    def scrape_posts(self, group_ids: List[str]) -> List[Dict[str, Any]]:
+    def scrape_posts(self, group_ids: List[str]) -> tuple[List[Dict[str, Any]], List[str]]:
         """
         Scrapes the latest posts from a list of Facebook groups.
         
@@ -32,7 +32,7 @@ class FacebookGroupScraper:
             group_ids: A list of Facebook Group IDs to scrape.
             
         Returns:
-            A list of normalized post dictionaries.
+            A tuple of (list of normalized post dictionaries, list of successfully scraped group IDs).
         """
         logger.info(f"[GROUPS] Starting scrape with actor: {self.ACTOR_ID}")
         
@@ -65,12 +65,26 @@ class FacebookGroupScraper:
             
             logger.info(f"[GROUPS] Fetched {len(items)} total posts.")
             
+            # Determine which groups were successfully scraped based on posts returned
+            successful_groups = set()
+            for item in items:
+                group_id = item.get('groupId')
+                if group_id:
+                    successful_groups.add(str(group_id))
+            
+            # Log which groups failed
+            failed_groups = set(group_ids) - successful_groups
+            if failed_groups:
+                logger.warning(f"[GROUPS] Failed to scrape {len(failed_groups)} groups: {', '.join(failed_groups)}")
+                logger.warning(f"[GROUPS] These groups may be private, deleted, or inaccessible")
+            
             normalized_posts = [self.normalize_post(post) for post in items]
-            return [p for p in normalized_posts if p]
+            return [p for p in normalized_posts if p], list(successful_groups)
 
         except Exception as e:
             logger.error(f"[GROUPS] Error running group scraper actor: {e}")
-            raise
+            # Return empty lists instead of raising - allow script to continue
+            return [], []
 
     def fetch_results_from_run(self, run_id: str) -> List[Dict[str, Any]]:
         """

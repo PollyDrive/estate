@@ -22,3 +22,19 @@ https://www.facebook.com/groups/1532302413717308/
 https://www.facebook.com/groups/148233492719297/
 https://www.facebook.com/groups/626657034147473/
 https://www.facebook.com/groups/479928732170537/
+
+https://www.facebook.com/groups/UbudHousingRental/
+https://www.facebook.com/groups/canggucommunityhousing/
+https://www.facebook.com/groups/balipropertyinfo/
+https://www.facebook.com/groups/1572212919736561/
+https://www.facebook.com/groups/378235222335197/
+
+private
+      // "1532302413717308",
+      // "148233492719297",
+      // "626657034147473",
+      // "179189038903917",
+      // "479928732170537",
+      // "921979121570193",
+      // "kerobokanVillas",
+      // "bali.rent"

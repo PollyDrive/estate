@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-STAGE 4: Deduplication and RU summary generation
-Groups listings by title, finds full duplicates, generates Russian summaries with Groq.
+STAGE 4: Deduplication and Russian summary generation
+Groups listings by title, finds full duplicates, generates brief Russian summaries with Zhipu.
 """
 
 import os
@@ -11,7 +11,7 @@ import json
 import time
 from pathlib import Path
 from dotenv import load_dotenv
-from groq import Groq
+from zhipuai import ZhipuAI
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -31,23 +31,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def generate_summary_ru(listing: dict, groq_client: Groq, config: dict, last_request_time: dict) -> str:
+def generate_summary_ru(listing: dict, zhipu_client: ZhipuAI, config: dict, last_request_time: dict) -> str:
     """
-    Generate Russian summary using Groq with rate limiting.
+    Generate brief Russian summary using Zhipu GLM-4 with rate limiting.
     
     Args:
         listing: Listing dictionary with title, description, etc.
-        groq_client: Groq client instance
+        zhipu_client: Zhipu client instance
         config: Configuration dictionary
         last_request_time: Dictionary tracking last request time (mutable)
         
     Returns:
-        Russian summary text
+        Brief Russian summary text
     """
     try:
-        # Get Groq config
-        groq_config = config['llm']['groq']
-        request_delay = groq_config.get('request_delay', 2.5)
+        # Get Zhipu config
+        zhipu_config = config['llm']['zhipu']
+        request_delay = zhipu_config.get('request_delay', 1.0)
         
         # Rate limiting: wait before making request
         if last_request_time.get('time'):
@@ -57,42 +57,45 @@ def generate_summary_ru(listing: dict, groq_client: Groq, config: dict, last_req
                 logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
                 time.sleep(wait_time)
         
-        # Get summary template from config or use default
-        summary_template = groq_config.get('summary_template', 
-            """You are a data extractor. Your task is to read the description and briefly fill in the fields in RUSSIAN.
-
-RULES:
-- Be brief. Use short phrases.
-- If information is missing, write "не указано".
-- DO NOT include phone numbers or any contact info.
-
-TEMPLATE TO FILL:
-- **Комнаты:** 
-- **Удобства:** 
-- **Включено:** 
-- **Район:** 
-- **Цена:** 
-- **Детали:** 
-
-Description:
-{description}
-
-RUSSIAN SUMMARY:""")
-        
         # Build full description with metadata
-        full_description = f"""Заголовок: {listing.get('title', 'N/A')}
+        full_text = f"""Заголовок: {listing.get('title', 'N/A')}
 Цена: {listing.get('price', 'N/A')}
 Локация: {listing.get('location', 'N/A')}
-Описание: {listing.get('description', 'N/A')[:500]}"""
+Описание: {listing.get('description', 'N/A')[:800]}"""
         
-        # Format prompt with description
-        prompt = summary_template.format(description=full_description)
+        # Prompt for structured list format (strict template)
+        prompt = f"""Извлеки из объявления ключевую информацию и верни СТРОГО в формате списка с маркерами.
 
-        response = groq_client.chat.completions.create(
-            model=groq_config['model'],
+ФОРМАТ (используй ТОЛЬКО маркеры •):
+• [количество] спальни/спален
+• [район, город]
+• [удобства через запятую: бассейн, кухня, AC, WiFi и т.д.]
+• [цена]/мес
+
+ПРАВИЛА:
+- Каждый пункт начинается с •
+- Каждый пункт на новой строке
+- БЕЗ лишних слов и предложений
+- Если информация отсутствует - пропускай пункт
+- НЕ добавляй эмодзи
+- НЕ добавляй комментарии
+
+ПРИМЕР:
+• 2 спальни
+• Убуд, Бали
+• Бассейн, кухня, AC, WiFi
+• 12 млн IDR/мес
+
+Текст объявления:
+{full_text}
+
+СПИСОК:"""
+
+        response = zhipu_client.chat.completions.create(
+            model=zhipu_config['model'],
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=300
+            temperature=0.1,
+            max_tokens=150
         )
         
         # Update last request time
@@ -103,7 +106,9 @@ RUSSIAN SUMMARY:""")
         
     except Exception as e:
         logger.error(f"Error generating summary for {listing.get('fb_id')}: {e}")
-        return f"Ошибка генерации описания: {str(e)}"
+        # Fallback to description snippet
+        desc = listing.get('description', 'Нет описания')[:150]
+        return f"Описание: {desc}..."
 
 
 def main():
@@ -126,15 +131,15 @@ def main():
     
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
-    groq_api_key = os.getenv('GROQ_API_KEY')
+    zhipu_api_key = os.getenv('ZHIPU_API_KEY')
     
-    if not all([db_url, groq_api_key]):
-        logger.error("Missing required environment variables (DATABASE_URL, GROQ_API_KEY)!")
+    if not all([db_url, zhipu_api_key]):
+        logger.error("Missing required environment variables (DATABASE_URL, ZHIPU_API_KEY)!")
         sys.exit(1)
     
-    # Initialize Groq client
-    groq_client = Groq(api_key=groq_api_key)
-    logger.info("✓ Groq client initialized")
+    # Initialize Zhipu client
+    zhipu_client = ZhipuAI(api_key=zhipu_api_key)
+    logger.info("✓ Zhipu client initialized")
     
     # Get listings with status 'stage3'
     with Database() as db:
@@ -183,7 +188,7 @@ def main():
                 logger.info(f"\nProcessing unique: {fb_id}")
                 
                 # Generate Russian summary
-                summary_ru = generate_summary_ru(listing, groq_client, config, last_request_time)
+                summary_ru = generate_summary_ru(listing, zhipu_client, config, last_request_time)
                 logger.info(f"  Summary: {summary_ru[:100]}...")
                 
                 # Update with summary and status
@@ -240,7 +245,7 @@ def main():
                         logger.info(f"  ✓ UNIQUE: {fb_id1}")
                         
                         # Generate Russian summary
-                        summary_ru = generate_summary_ru(listing1, groq_client, config, last_request_time)
+                        summary_ru = generate_summary_ru(listing1, zhipu_client, config, last_request_time)
                         logger.info(f"    Summary: {summary_ru[:100]}...")
                         
                         # Update with summary and status
@@ -263,7 +268,7 @@ def main():
     logger.info(f"Russian summaries generated: {summaries_generated}")
     logger.info("")
     logger.info("Listings with status 'stage4' are ready for Telegram")
-    logger.info("Command: python3 scripts/run_stage5.py")
+    logger.info("Command: python3 scripts/send_to_telegram.py")
     logger.info("=" * 80)
 
 

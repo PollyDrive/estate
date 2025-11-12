@@ -99,11 +99,18 @@ def main():
     scraper = FacebookGroupScraper(apify_key, config)
     
     try:
-        all_posts = scraper.scrape_posts(groups_to_scrape)
-        logger.info(f"✓ Scraped {len(all_posts)} total posts from {len(groups_to_scrape)} groups.")
+        all_posts, successful_groups = scraper.scrape_posts(groups_to_scrape)
+        logger.info(f"✓ Scraped {len(all_posts)} total posts from {len(successful_groups)}/{len(groups_to_scrape)} groups.")
+        
+        if len(successful_groups) < len(groups_to_scrape):
+            failed_groups = set(groups_to_scrape) - set(successful_groups)
+            logger.warning(f"⚠ {len(failed_groups)} groups failed to scrape: {', '.join(failed_groups)}")
+            logger.info(f"These groups will be retried in the next run")
     except Exception as e:
         logger.error(f"✗ Error during scraping: {e}", exc_info=True)
-        sys.exit(1)
+        logger.warning("Continuing with empty results...")
+        all_posts = []
+        successful_groups = []
     
     # --- Filtering Logic ---
     logger.info("Filtering candidates by title/text criteria...")
@@ -157,7 +164,8 @@ def main():
                         location=candidate.get('location', ''),
                         listing_url=candidate['listing_url'],
                         source='facebook_group',
-                        group_id=str(candidate.get('group_id', ''))
+                        group_id=str(candidate.get('group_id', '')),
+                        description=candidate.get('description', '')
                     )
                     if was_added:
                         saved_count += 1
@@ -167,11 +175,16 @@ def main():
         logger.info(f"✓ Saved {saved_count} new unique candidates to 'listings' table.")
 
     # --- Update State Logic ---
+    # Only update state for successfully scraped groups
     now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    for group_id in groups_to_scrape:
+    for group_id in successful_groups:
         state[group_id] = now_iso
     save_state(state)
-    logger.info(f"Updated scraper state for {len(groups_to_scrape)} groups.")
+    logger.info(f"Updated scraper state for {len(successful_groups)} successfully scraped groups.")
+    
+    if len(successful_groups) < len(groups_to_scrape):
+        failed_count = len(groups_to_scrape) - len(successful_groups)
+        logger.info(f"{failed_count} groups were not updated and will be retried in the next run")
 
     # --- Summary ---
     logger.info("=" * 80)

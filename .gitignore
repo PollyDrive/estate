@@ -3,8 +3,8 @@
 .env.local
 .env.*.local
 
-/docs
-
+# Backups
+backups/
 backup.*
 backup*.*
 apify_logs/

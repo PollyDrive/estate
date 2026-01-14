@@ -140,20 +140,22 @@ def main():
                 # Parse ONLY from description (title can be incorrect/outdated)
                 params = parser.parse(description)
                 
-                # Final criteria check
+                # Final criteria check with Stage 2 filters (kitchen required, bedrooms >= 2)
                 criterias = config.get('criterias', {})
-                passed, reason = parser.matches_criteria(params, criterias)
+                passed, reason = parser.matches_criteria(params, criterias, stage=2)
                 
                 new_status = 'stage2' if passed else 'stage2_failed'
                 logger.info(f"Processing {fb_id}: Status '{new_status}'. Reason: {reason}")
 
+            # Extract location from description
+            location_extracted = parser.extract_location(description) if description else None
+            
             # Prepare details for DB update
             update_details = {
                 'description': description,
                 'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
                 'bedrooms': params.get('bedrooms') if 'params' in locals() else None,
                 'price_extracted': params.get('price') if 'params' in locals() else None,
-                'kitchen_type': params.get('kitchen_type') if 'params' in locals() else None,
                 'has_ac': params.get('has_ac', False) if 'params' in locals() else False,
                 'has_wifi': params.get('has_wifi', False) if 'params' in locals() else False,
                 'has_pool': params.get('has_pool', False) if 'params' in locals() else False,
@@ -161,8 +163,7 @@ def main():
                 'utilities': params.get('utilities') if 'params' in locals() else None,
                 'furniture': params.get('furniture') if 'params' in locals() else None,
                 'rental_term': params.get('rental_term') if 'params' in locals() else None,
-                'all_images': json.dumps(listing_details.get('all_images', [])),
-                'timestamp': listing_details.get('timestamp'),
+                'location_extracted': location_extracted,
                 'status': new_status
             }
             
@@ -183,6 +184,10 @@ def main():
             fb_id = listing['fb_id']
             description = listing['description']
             
+            # Extract title and location from description for groups
+            extracted_title = parser.extract_title_from_description(description, max_length=150)
+            location_extracted = parser.extract_location(description) if description else None
+            
             # Check for detailed stop words in description
             found_detailed_stop_word = None
             if description and stop_words_detailed_lower:
@@ -200,20 +205,22 @@ def main():
                 # Parse ONLY from description (title can be incorrect/outdated)
                 params = parser.parse(description)
                 
-                # Final criteria check
+                # Final criteria check with Stage 2 filters (kitchen required, bedrooms >= 2)
                 criterias = config.get('criterias', {})
-                passed, reason = parser.matches_criteria(params, criterias)
+                passed, reason = parser.matches_criteria(params, criterias, stage=2)
                 
                 new_status = 'stage2' if passed else 'stage2_failed'
                 logger.info(f"  Processing {fb_id}: Status '{new_status}'. Reason: {reason}")
             
             # Prepare details for DB update
             update_details = {
+                'title': extracted_title,  # Extract title from description
                 'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
                 'bedrooms': params.get('bedrooms') if 'params' in locals() else None,
                 'price_extracted': params.get('price') if 'params' in locals() else None,
                 'has_ac': params.get('has_ac', False) if 'params' in locals() else False,
                 'has_wifi': params.get('has_wifi', False) if 'params' in locals() else False,
+                'location_extracted': location_extracted,
                 'status': new_status
             }
             

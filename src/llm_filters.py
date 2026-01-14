@@ -53,34 +53,49 @@ Respond with ONE category code ONLY.
 
 RULES (check in order):
 1.  **TYPE**:
-    -   Check for 'dijual', 'leasehold', 'land', 'tanah', 'office', 'kos', 'kost', 'for sale', 'sold', 'warung', 'tempat jualan', 'toko'.
-    -   If found -> 'REJECT_TYPE'.
+    -   REJECT these sale/commercial types: 'dijual', 'for sale', 'sold', 'land', 'tanah', 'office', 'kos', 'kost', 'warung', 'tempat jualan', 'toko'.
+    -   REJECT under construction: 'under construction', 'masih dibangun', 'sedang dibangun', 'finishing stage', 'belum selesai', 'not ready', 'will be ready'.
+    -   ACCEPT 'construction nearby' or 'construction next door' (not under construction itself).
+    -   CRITICAL: IGNORE 'leasehold' if it's describing rental contract duration (e.g., 'Leasehold 19 Years' = rental contract term = ACCEPT).
+    -   ONLY reject 'leasehold' if combined with sale words: 'leasehold for sale', 'dijual leasehold', 'selling leasehold'.
+    -   If REJECT reason found -> 'REJECT_TYPE'.
+
+1.5 **ROOM_ONLY** (CRITICAL - check for single room rentals):
+    -   Check if listing is for a SINGLE ROOM inside a house/villa (not a complete property)
+    -   Reject patterns: 'room for rent', 'single room', 'private room', 'kamar untuk disewa', 'kamar saja', 'sewa kamar', 'room only', 'one room', '1 room available', 'spare room', 'renting a room'
+    -   Accept patterns: 'villa', 'house', 'rumah', 'apartment', 'complete unit', 'entire place', 'whole house'
+    -   IMPORTANT: '1 bedroom villa' = complete villa with 1 bedroom = OK for this rule (but rejected in BEDROOMS rule)
+    -   IMPORTANT: 'room for rent' without mention of complete property = REJECT_ROOM_ONLY
+    -   If found room only -> 'REJECT_ROOM_ONLY'
 
 2.  **BEDROOMS** (CRITICAL - read VERY carefully):
-    -   ACCEPT ONLY if description EXPLICITLY mentions exactly 2 bedrooms
-    -   Valid 2BR forms: '2 bed', '2 bedroom', '2BR', '2 BR', '2kt', '2 KT', '2 kamar tidur', '2 kamar', 'dua kamar', 'two bedroom'
+    -   ACCEPT if description mentions 2, 3, or 4 bedrooms
+    -   Valid forms: '2 bed', '2BR', '2kt', '3 bed', '3BR', '3kt', '4 bed', '4BR', '4kt'
     -   REJECT if 1 bedroom: '1 bed', '1 bedroom', '1BR', '1 kamar', '1kt', '1 room', 'studio', 'one bedroom' -> 'REJECT_BEDROOMS'
-    -   REJECT if 3+ bedrooms: '3 bed', '3BR', '3kt', '4 bed', etc. -> 'REJECT_BEDROOMS'
+    -   REJECT if 5+ bedrooms: '5 bed', '5BR', '5kt', '6 bed', etc. -> 'REJECT_BEDROOMS'
     -   REJECT if studio -> 'REJECT_BEDROOMS'
     -   REJECT if NO bedroom count mentioned in description -> 'REJECT_BEDROOMS'
     -   IMPORTANT: '2KT' = '2 kamar tidur' = 2 bedrooms = ACCEPT
+    -   IMPORTANT: '3KT' = '3 kamar tidur' = 3 bedrooms = ACCEPT
     -   IMPORTANT: If description only lists facilities without bedroom count -> 'REJECT_BEDROOMS'
 
 3.  **TERM** (CRITICAL - read carefully):
-    -   Check if price is explicitly stated as YEARLY ONLY:
-        * Look for patterns: 'X mln/year', 'X jt/tahun', 'yearly X', 'price yearly', 'per year', 'per tahun', 'tahunan', '/year', '/yr', 'upfront'
-        * If YEARLY price is mentioned WITHOUT monthly option -> 'REJECT_TERM'
-    -   ACCEPT if:
-        * 'monthly', 'bulanan', '/month', '/mo', 'per month', 'per bulan' is mentioned
-        * 'monthly or yearly' (both options available)
-        * No explicit term mentioned (assume monthly by default)
-    -   REJECT if:
-        * 'daily', 'harian', '/day' -> 'REJECT_TERM'
-        * 'minimal 6 bulan', 'minimal 1 tahun' -> 'REJECT_TERM'
-
-4.  **FURNITURE**:
-    -   Check for 'unfurnished', 'kosongan'.
-    -   If found -> 'REJECT_FURNITURE'.
+    -   ONLY REJECT for daily/weekly/hourly rentals:
+        * 'daily', 'harian', '/day', 'per day', '/hari'
+        * 'nightly', 'per night', '/night'
+        * 'weekly', 'mingguan', '/week', '/minggu'
+        * 'hourly', 'per hour', '/jam'
+        * If found -> 'REJECT_TERM'
+    -   ACCEPT for ALL other rental terms including:
+        * Monthly: 'monthly', 'bulanan', '/month', '/mo', '/bulan', 'per month', 'per bulan'
+        * Yearly: 'yearly', 'tahunan', '/year', '/tahun', '/th', 'per year', 'per tahun' (ALL yearly formats accepted!)
+        * Multi-year: '2 tahun', '3 years', '5 tahun' (prices already converted to monthly)
+        * Long-term: 'minimal 6 bulan', 'minimal 1 tahun', 'minimum 2 years', 'long term', 'kontrak tahunan'
+        * Mixed: 'monthly or yearly', 'bulanan atau tahunan', 'for rent'
+        * Upfront: '6 months upfront', '1 year upfront' (this is OK - long-term commitment)
+        * No term mentioned (assume monthly/long-term by default)
+    -   IMPORTANT: ALL yearly rentals are ACCEPTED because prices are already converted to monthly
+    -   IMPORTANT: '/th' = '/tahun' = per year = ACCEPT (not reject!)
 
 5.  **PRICE** (IMPORTANT - check carefully):
     -   Look for monthly price: numbers followed by 'jt', 'juta', 'million', 'm', 'mln', 'mil', 'IDR', 'Rp'
@@ -96,14 +111,31 @@ EXAMPLES:
 - Description: 'Villa 1BR in Ubud, 10jt/month' -> REJECT_BEDROOMS (1 bedroom)
 - Description: 'Studio apartment with kitchen' -> REJECT_BEDROOMS (studio)
 - Description: '2 KT 1 Kamar Mandi - Rumah, 12jt/month' -> PASS (2KT = 2 bedrooms!)
-- Description: '3 KT 2 KM - Rumah, 15jt/month' -> REJECT_BEDROOMS (3 bedrooms)
-- Description: 'Land for rent, 5jt/month' -> REJECT_TYPE
+- Description: '3 KT 2 KM - Rumah, 15jt/month' -> PASS (3KT = 3 bedrooms, OK!)
+- Description: '4BR villa Cemagi, 12jt/month' -> PASS (4 bedrooms, OK!)
+- Description: '5BR villa, 14jt/month' -> REJECT_BEDROOMS (5 bedrooms, too many)
+- Description: 'Land for rent, 5jt/month' -> REJECT_TYPE (land)
 - Description: 'Menerima kos perempuan' -> REJECT_TYPE (kos)
 - Description: 'Di sewa tempat jualan' -> REJECT_TYPE (tempat jualan)
+- Description: '4BR villa under construction, 80% finished, 12jt' -> REJECT_TYPE (under construction)
+- Description: 'New house masih dibangun, available next month' -> REJECT_TYPE (sedang dibangun)
+- Description: '3BR villa, 95% done, on finishing stage, 15jt' -> REJECT_TYPE (finishing stage)
+- Description: '2BR house leasehold for sale, 500jt' -> REJECT_TYPE (leasehold sale)
+- Description: '3BR villa, leasehold 20 years, 10jt/month' -> PASS (leasehold rental term, not sale)
+- Description: '2BR, construction nearby, 12jt/month' -> PASS (nearby construction OK)
+- Description: 'Room for rent in shared house, 3jt/month' -> REJECT_ROOM_ONLY (single room)
+- Description: 'Private room available in villa, 4jt' -> REJECT_ROOM_ONLY (room only)
+- Description: 'Sewa kamar di rumah, AC, 5jt/bulan' -> REJECT_ROOM_ONLY (kamar saja)
 - Description: 'Facilities: AC, TV, kitchen' -> REJECT_BEDROOMS (no bedroom count)
 - Description: '1 building 1 room with AC' -> REJECT_BEDROOMS (1 room)
-- Description: 'Villa 2BR, 150jt/year' -> REJECT_TERM (yearly only)
-- Description: '2BR Villa, 180 mln/year' -> REJECT_TERM (yearly only)
+- Description: 'Villa 2BR, 150jt/year' -> PASS (yearly OK, price converted to 12.5jt/month)
+- Description: '2BR Villa, 180 mln/year' -> PASS (yearly OK, price converted to 15jt/month)
+- Description: '3 kamar tidur, hrg 12jt/th nett' -> PASS (/th = per tahun = yearly = ACCEPT!)
+- Description: '2BR house, 100mln/6 months upfront' -> PASS (long-term commitment = OK)
+- Description: '3BR Villa, unfurnished, 14jt/month' -> PASS (furniture not a criterion)
+- Description: '2BR, minimal 1 tahun, 15jt/month' -> PASS (long-term OK)
+- Description: '2 bedroom house, daily rent, 500k/day' -> REJECT_TERM (daily rental)
+- Description: 'Villa nightly rental, 2jt/night' -> REJECT_TERM (nightly rental)
 - Description: '2 bedroom house, monthly rent, 15jt' -> PASS
 - Description: '2BR Villa, beautiful, 500jt' -> REJECT_PRICE (>16jt)
 - Description: 'Two bedroom villa with pool, 14jt/month' -> PASS

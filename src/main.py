@@ -127,10 +127,13 @@ def run_stage2_details_scrape(config: dict, db: Database):
             params = parser.parse(description)
             
             criterias = config.get('criterias', {})
-            passed, reason = parser.matches_criteria(params, criterias)
+            passed, reason = parser.matches_criteria(params, criterias, stage=2)
             
-            logger.info(f"[STAGE 2] Processing {fb_id}: Passed simple filters: {passed}. Reason: {reason}")
+            logger.info(f"[STAGE 2] Processing {fb_id}: Passed Stage 2 filters: {passed}. Reason: {reason}")
 
+            # Extract location
+            location_extracted = parser.extract_location(description) if description else None
+            
             # Prepare details for DB update
             update_details = {
                 'description': description,
@@ -145,8 +148,7 @@ def run_stage2_details_scrape(config: dict, db: Database):
                 'utilities': params.get('utilities'),
                 'furniture': params.get('furniture'),
                 'rental_term': params.get('rental_term'),
-                'all_images': json.dumps(listing_details.get('all_images', [])),
-                'timestamp': listing_details.get('timestamp')
+                'location_extracted': location_extracted
             }
             
             db.update_listing_after_stage2(fb_id, update_details, passed)
@@ -212,7 +214,7 @@ def run_telegram_notifications(config: dict, db: Database, telegram: TelegramNot
         fb_id = listing['fb_id']
         
         # Re-create a human-readable summary for the message
-        summary_ru = listing.get('groq_reason', 'Подходящий вариант') # Use Groq reason as a summary
+        summary_ru = listing.get('llm_reason', 'Подходящий вариант') # Use LLM reason as a summary
         price_display = listing.get('price', '')
         if listing.get('price_extracted'):
             price_display = f"Rp {listing['price_extracted']:,.0f}"

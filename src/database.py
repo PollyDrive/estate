@@ -148,17 +148,17 @@ class Database:
             logger.error(f"Error getting listings for Stage 3: {e}")
             return []
 
-    def update_listing_after_stage3(self, fb_id: str, groq_passed: bool, groq_reason: str):
+    def update_listing_after_stage3(self, fb_id: str, llm_passed: bool, llm_reason: str):
         """
         Updates a listing with the results of the LLM analysis (Stage 3).
         """
         query = """
             UPDATE listings 
-            SET status = %s, groq_passed = %s, groq_reason = %s, groq_analyzed_at = NOW()
+            SET status = %s, llm_passed = %s, llm_reason = %s, llm_analyzed_at = NOW()
             WHERE fb_id = %s
         """
         try:
-            self.cursor.execute(query, (STATUS_STAGE3_ANALYZED, groq_passed, groq_reason, fb_id))
+            self.cursor.execute(query, (STATUS_STAGE3_ANALYZED, llm_passed, llm_reason, fb_id))
             self.conn.commit()
             logger.info(f"Stage 3: Updated listing {fb_id} with LLM analysis results.")
         except Exception as e:
@@ -171,7 +171,7 @@ class Database:
         """
         query = """
             SELECT * FROM listings 
-            WHERE status = %s AND groq_passed = TRUE AND telegram_sent = FALSE
+            WHERE status = %s AND llm_passed = TRUE AND telegram_sent = FALSE
             ORDER BY created_at DESC
         """
         try:

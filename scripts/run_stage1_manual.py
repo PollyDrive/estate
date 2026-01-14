@@ -102,7 +102,7 @@ def main():
     if candidates:
         logger.info(f"Saving {len(candidates)} candidates to database...")
         
-        with Database(db_url) as db:
+        with Database() as db:
             for candidate in candidates:
                 try:
                     # Use the new method to add listings with 'stage1' status

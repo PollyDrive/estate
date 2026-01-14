@@ -113,23 +113,25 @@ def main():
         successful_groups = []
     
     # --- Filtering Logic ---
-    logger.info("Filtering candidates by title/text criteria...")
+    logger.info("Filtering candidates by description/text criteria...")
     criterias = config.get('criterias', {})
     stop_words = config.get('filters', {}).get('stop_words', [])
     stop_locations = config.get('filters', {}).get('stop_locations', [])
     candidates = []
     
     for post in all_posts:
-        params = parser.parse(post['title'])
-        passed, reason = parser.matches_criteria(params, criterias)
+        # For groups, parse description (not title which is empty)
+        description = post.get('description', '')
+        params = parser.parse(description)
+        passed, reason = parser.matches_criteria(params, criterias, stage=1)
         
-        # Additional stop-word filtering in title
-        if passed:
-            title_lower = post['title'].lower()
+        # Additional stop-word filtering in description text
+        if passed and description:
+            description_lower = description.lower()
             for stop_word in stop_words:
-                if stop_word.lower() in title_lower:
+                if stop_word.lower() in description_lower:
                     passed = False
-                    reason = f"Stop word in title: {stop_word}"
+                    reason = f"Stop word in description: {stop_word}"
                     break
         
         # Additional stop-location filtering in location field
@@ -177,14 +179,20 @@ def main():
     # --- Update State Logic ---
     # Only update state for successfully scraped groups
     now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    for group_id in successful_groups:
-        state[group_id] = now_iso
-    save_state(state)
-    logger.info(f"Updated scraper state for {len(successful_groups)} successfully scraped groups.")
+    
+    if successful_groups:
+        logger.info(f"Updating state for successful groups: {', '.join(successful_groups)}")
+        for group_id in successful_groups:
+            state[group_id] = now_iso
+        save_state(state)
+        logger.info(f"✓ Updated scraper state for {len(successful_groups)} successfully scraped groups.")
+    else:
+        logger.warning("No successful groups to update in state (all groups may have failed or returned no valid posts)")
     
     if len(successful_groups) < len(groups_to_scrape):
         failed_count = len(groups_to_scrape) - len(successful_groups)
-        logger.info(f"{failed_count} groups were not updated and will be retried in the next run")
+        failed_groups = set(groups_to_scrape) - set(successful_groups)
+        logger.info(f"⚠ {failed_count} groups were not updated and will be retried in the next run: {', '.join(failed_groups)}")
 
     # --- Summary ---
     logger.info("=" * 80)

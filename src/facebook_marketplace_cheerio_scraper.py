@@ -399,7 +399,6 @@ class FacebookMarketplaceCheerioScraper:
                 'description': description,
                 'listing_url': listing_url,
                 'image_url': image_url,
-                'all_images': [image_url] if image_url else [],
                 'price': price_formatted,
                 'price_raw': price_amount,
                 'location': location_text,
@@ -408,7 +407,6 @@ class FacebookMarketplaceCheerioScraper:
                 'latitude': latitude,
                 'longitude': longitude,
                 'seller_name': seller_name,
-                'timestamp': None,  # Actor doesn't provide timestamp
                 'raw_data': raw,  # Keep full raw data for debugging
             }
             

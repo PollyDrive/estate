@@ -86,6 +86,117 @@ def format_regular_message(listing: dict) -> str:
     return message
 
 
+def format_no_description_batch(listings: list) -> str:
+    """
+    Format batch of no_description listings as simple links.
+    
+    Args:
+        listings: List of listing dictionaries (up to 5)
+        
+    Returns:
+        Formatted Telegram message with links
+    """
+    message = "📝 *Найдены объявления без описания*\n\n"
+    
+    for listing in listings:
+        url = listing.get('listing_url', '')
+        price = listing.get('price', '')
+        title = listing.get('title', '')
+        
+        # Start with bullet point and title/URL
+        if title:
+            message += f"• {title}\n"
+        else:
+            message += f"• Объявление\n"
+        
+        # Add price if available
+        if price:
+            message += f"  💰 {price}\n"
+        
+        # Add URL
+        message += f"  🔗 {url}\n\n"
+    
+    return message.strip()
+
+
+def check_and_send_no_description(db: Database, notifier: TelegramNotifier) -> int:
+    """
+    Check for no_description listings that passed all filters and send to Telegram.
+    Sends in batches of 5 listings per message.
+    
+    Args:
+        db: Database connection
+        notifier: TelegramNotifier instance
+        
+    Returns:
+        Number of no_description listings sent
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("Checking for no_description listings...")
+    logger.info("=" * 80)
+    
+    # Get no_description listings that haven't been sent to Telegram
+    query = """
+        SELECT fb_id, title, price, listing_url, created_at
+        FROM listings
+        WHERE status = 'no_description'
+          AND telegram_sent = FALSE
+        ORDER BY created_at ASC
+    """
+    
+    db.cursor.execute(query)
+    columns = [desc[0] for desc in db.cursor.description]
+    listings = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
+    
+    total_count = len(listings)
+    logger.info(f"Found {total_count} no_description listings pending notification")
+    
+    if total_count == 0:
+        logger.info("✓ No no_description listings to send")
+        return 0
+    
+    sent_count = 0
+    batch_size = 5
+    
+    # Split into batches of 5
+    for i in range(0, total_count, batch_size):
+        batch = listings[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (total_count + batch_size - 1) // batch_size
+        
+        logger.info(f"\nSending batch {batch_num}/{total_batches} ({len(batch)} listings)...")
+        
+        try:
+            message = format_no_description_batch(batch)
+            success = notifier.send_message(message)
+            
+            if success:
+                # Mark all listings in this batch as sent
+                fb_ids = [listing['fb_id'] for listing in batch]
+                placeholders = ', '.join(['%s'] * len(fb_ids))
+                db.cursor.execute(
+                    f"UPDATE listings SET telegram_sent = TRUE, telegram_sent_at = NOW() WHERE fb_id IN ({placeholders})",
+                    fb_ids
+                )
+                db.conn.commit()
+                
+                sent_count += len(batch)
+                logger.info(f"✓ Batch {batch_num}/{total_batches} sent successfully ({len(batch)} listings)")
+                
+                # Delay between batches (except last one)
+                if i + batch_size < total_count:
+                    logger.debug("  ⏱️  Waiting 2s before next batch...")
+                    time.sleep(2)
+            else:
+                logger.error(f"✗ Failed to send batch {batch_num}/{total_batches}")
+                
+        except Exception as e:
+            logger.error(f"✗ Error sending batch {batch_num}/{total_batches}: {e}")
+    
+    logger.info(f"\n✓ Sent {sent_count}/{total_count} no_description listings to Telegram")
+    return sent_count
+
+
 def main():
     """Run Stage 5: Send listings to Telegram with batching"""
     
@@ -145,83 +256,91 @@ def main():
               AND (telegram_sent IS NULL OR telegram_sent = FALSE)
         """)
         total_unsent = db.cursor.fetchone()[0]
-        logger.info(f"\n📊 Total unsent listings: {total_unsent}")
+        logger.info(f"\n📊 Total unsent regular listings: {total_unsent}")
         
         if total_unsent == 0:
-            logger.info("✓ No listings to send. All caught up!")
-            logger.info("=" * 80)
-            sys.exit(0)
+            logger.info("✓ No regular listings to send in this batch.")
         
-        # Fetch OLDEST unsent listings (FIFO - First In First Out)
-        logger.info(f"\nFetching up to {batch_size} OLDEST unsent listings...")
-        query = """
-            SELECT fb_id, title, summary_ru, price, phone_number, listing_url, created_at
-            FROM listings
-            WHERE status = 'stage4'
-              AND (telegram_sent IS NULL OR telegram_sent = FALSE)
-            ORDER BY created_at ASC
-            LIMIT %s
-        """
-        db.cursor.execute(query, (batch_size,))
-        columns = [desc[0] for desc in db.cursor.description]
-        listings = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
-        
-        logger.info(f"Found {len(listings)} listings to send in this batch")
-        
-        if len(listings) == 0:
-            logger.info("✓ No listings in this batch. Done!")
-            logger.info("=" * 80)
-            sys.exit(0)
+        # Fetch OLDEST unsent listings (FIFO - First In First Out) if any
+        if total_unsent > 0:
+            logger.info(f"\nFetching up to {batch_size} OLDEST unsent listings...")
+            query = """
+                SELECT fb_id, title, summary_ru, price, phone_number, listing_url, created_at
+                FROM listings
+                WHERE status = 'stage4'
+                  AND (telegram_sent IS NULL OR telegram_sent = FALSE)
+                ORDER BY created_at ASC
+                LIMIT %s
+            """
+            db.cursor.execute(query, (batch_size,))
+            columns = [desc[0] for desc in db.cursor.description]
+            listings = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
+            
+            logger.info(f"Found {len(listings)} listings to send in this batch")
+        else:
+            listings = []
         
         # Send each listing with delay
-        for i, listing in enumerate(listings, 1):
-            fb_id = listing['fb_id']
-            
-            try:
-                message = format_regular_message(listing)
+        if listings:
+            for i, listing in enumerate(listings, 1):
+                fb_id = listing['fb_id']
                 
-                # Send to Telegram
-                success = notifier.send_message(message)
-                
-                if success:
-                    # Update status to stage5_sent and mark as sent
-                    db.cursor.execute(
-                        "UPDATE listings SET status = 'stage5_sent', telegram_sent = TRUE, telegram_sent_at = NOW() WHERE fb_id = %s",
-                        (fb_id,)
-                    )
-                    db.conn.commit()
+                try:
+                    message = format_regular_message(listing)
                     
-                    created_at = listing.get('created_at', 'unknown')
-                    logger.info(f"✓ [{i}/{len(listings)}] SENT: {fb_id} (created: {created_at})")
-                    sent_count += 1
+                    # Send to Telegram
+                    success = notifier.send_message(message)
                     
-                    # Delay between messages (except for last one)
-                    if i < len(listings):
-                        logger.debug(f"  ⏱️  Waiting {delay_between_messages}s before next message...")
-                        time.sleep(delay_between_messages)
-                else:
-                    logger.error(f"✗ [{i}/{len(listings)}] FAILED to send: {fb_id}")
+                    if success:
+                        # Update status to stage5_sent and mark as sent
+                        db.cursor.execute(
+                            "UPDATE listings SET status = 'stage5_sent', telegram_sent = TRUE, telegram_sent_at = NOW() WHERE fb_id = %s",
+                            (fb_id,)
+                        )
+                        db.conn.commit()
+                        
+                        created_at = listing.get('created_at', 'unknown')
+                        logger.info(f"✓ [{i}/{len(listings)}] SENT: {fb_id} (created: {created_at})")
+                        sent_count += 1
+                        
+                        # Delay between messages (except for last one)
+                        if i < len(listings):
+                            logger.debug(f"  ⏱️  Waiting {delay_between_messages}s before next message...")
+                            time.sleep(delay_between_messages)
+                    else:
+                        logger.error(f"✗ [{i}/{len(listings)}] FAILED to send: {fb_id}")
+                        error_count += 1
+                        
+                except Exception as e:
+                    logger.error(f"✗ [{i}/{len(listings)}] ERROR sending {fb_id}: {e}")
                     error_count += 1
-                    
-            except Exception as e:
-                logger.error(f"✗ [{i}/{len(listings)}] ERROR sending {fb_id}: {e}")
-                error_count += 1
+            
+            # Check if more listings remain
+            remaining = total_unsent - sent_count
+            
+            # Summary
+            logger.info("\n" + "=" * 80)
+            logger.info("REGULAR LISTINGS BATCH COMPLETE")
+            logger.info(f"Successfully sent: {sent_count}")
+            logger.info(f"Errors: {error_count}")
+            logger.info(f"Remaining unsent: {remaining}")
+            
+            if remaining > 0:
+                logger.info(f"\n💡 Run again in 30 minutes to send next batch of {min(batch_size, remaining)}")
+            else:
+                logger.info(f"\n✅ All regular listings sent! No more pending.")
+            
+            logger.info("=" * 80)
         
-        # Check if more listings remain
-        remaining = total_unsent - sent_count
+        # Check and send no_description listings
+        no_desc_sent = check_and_send_no_description(db, notifier)
         
-        # Summary
+        # Final summary
         logger.info("\n" + "=" * 80)
-        logger.info("BATCH COMPLETE")
-        logger.info(f"Successfully sent: {sent_count}")
-        logger.info(f"Errors: {error_count}")
-        logger.info(f"Remaining unsent: {remaining}")
-        
-        if remaining > 0:
-            logger.info(f"\n💡 Run again in 30 minutes to send next batch of {min(batch_size, remaining)}")
-        else:
-            logger.info(f"\n✅ All listings sent! No more pending.")
-        
+        logger.info("STAGE 5 COMPLETE")
+        logger.info(f"Regular listings sent: {sent_count}")
+        logger.info(f"No-description listings sent: {no_desc_sent}")
+        logger.info(f"Total sent: {sent_count + no_desc_sent}")
         logger.info("=" * 80)
         
     finally:

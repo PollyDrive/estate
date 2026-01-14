@@ -35,6 +35,8 @@ class PropertyParser:
             r'(\d+[.,]\d+)\s*(?:jt|juta|million|m)\b',
             # Whole number with jt/juta/million (10 juta, 5jt)
             r'(\d+)\s*(?:jt|juta|million|m)\b',
+            # Special formats: 180mln, 250mio, 90mill (no space between number and unit)
+            r'(\d+)\s*(?:mln|mio|mill)\b',
             # IDR/Rp followed by number (treat as millions if < 100)
             r'(?:rp|idr)[\s.]?(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(?:jt|juta|jt/bln|juta/bulan|million|m)?',
             # Any number with thousand separators (full format like 10.000.000)
@@ -206,6 +208,22 @@ class PropertyParser:
                 r'\bkos\b',  # Kos (hostel/boarding house)
                 r'\bkost\b',  # Kost (variant spelling)
             ]
+        
+        # Known locations in Bali (common areas)
+        self.known_locations = [
+            # Allowed locations (high priority)
+            'Ubud', 'Abiansemal', 'Singakerta', 'Mengwi', 'Gianyar',
+            # Other popular locations
+            'Canggu', 'Seminyak', 'Kuta', 'Legian', 'Sanur', 
+            'Denpasar', 'Uluwatu', 'Jimbaran', 'Nusa Dua',
+            'Pererenan', 'Berawa', 'Echo Beach', 'Batu Bolong',
+            'Umalas', 'Kerobokan', 'Petitenget',
+            'Bingin', 'Padang Padang', 'Balangan',
+            'Candidasa', 'Amed', 'Lovina', 'Singaraja',
+            'Tabanan', 'Kediri', 'Munggu', 'Tanah Lot',
+            'Tegallalang', 'Payangan', 'Petulu', 'Mas', 'Lodtunduh',
+            'Sukawati', 'Celuk', 'Batuan', 'Blahbatuh'
+        ]
     
     def parse(self, text: str) -> Dict:
         """
@@ -250,7 +268,7 @@ class PropertyParser:
         return None
     
     def _extract_price(self, text: str) -> Optional[float]:
-        """Extract price in IDR (returns actual value, not millions)."""
+        """Extract price in IDR (returns monthly price)."""
         for pattern in self.price_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -258,8 +276,10 @@ class PropertyParser:
                     price_str = match.group(1)
                     matched_text = match.group(0).lower()
                     
-                    # Handle million/juta formats
-                    if 'jt' in matched_text or 'juta' in matched_text or 'million' in matched_text or matched_text.strip().endswith('m'):
+                    # Handle million/juta formats including mln, mio, mill
+                    if ('jt' in matched_text or 'juta' in matched_text or 'million' in matched_text or 
+                        'mln' in matched_text or 'mio' in matched_text or 'mill' in matched_text or 
+                        matched_text.strip().endswith('m')):
                         # Replace comma with dot for decimal (3,5 → 3.5)
                         price_str_normalized = price_str.replace(',', '.')
                         price = float(price_str_normalized) * 1_000_000
@@ -273,6 +293,29 @@ class PropertyParser:
                         # The logic now relies on explicit markers like "jt" or "juta".
                         # if price < 100:
                         #     price = price * 1_000_000
+                    
+                    # Check if price context indicates yearly/annual rental
+                    # Look for yearly indicators within 50 chars before/after the price
+                    start_pos = max(0, match.start() - 50)
+                    end_pos = min(len(text), match.end() + 50)
+                    context = text[start_pos:end_pos].lower()
+                    
+                    yearly_indicators = [
+                        r'yearly',
+                        r'year',
+                        r'/year',
+                        r'per year',
+                        r'tahunan',
+                        r'/tahun',
+                        r'per tahun',
+                        r'/yr',
+                    ]
+                    
+                    is_yearly = any(re.search(indicator, context) for indicator in yearly_indicators)
+                    
+                    # Convert yearly to monthly if needed
+                    if is_yearly:
+                        price = price / 12
                     
                     return price
                 except (ValueError, IndexError):
@@ -349,6 +392,84 @@ class PropertyParser:
                 return True
         return False
     
+    def extract_location(self, text: str) -> Optional[str]:
+        """
+        Extract location from text.
+        Looks for patterns like "in Ubud", "at Canggu", location names.
+        
+        Args:
+            text: Description text
+            
+        Returns:
+            Extracted location name or None
+        """
+        if not text:
+            return None
+        
+        text_lower = text.lower()
+        
+        # Pattern 1: "in Location" (most explicit)
+        for location in self.known_locations:
+            location_lower = location.lower()
+            
+            # Try explicit patterns first
+            patterns = [
+                rf'\bin\s+{re.escape(location_lower)}\b',
+                rf'\bat\s+{re.escape(location_lower)}\b',
+                rf'\bdi\s+{re.escape(location_lower)}\b',  # Indonesian "di" = in/at
+                rf'{re.escape(location_lower)}\s+area\b',
+                rf'{re.escape(location_lower)}\s+location\b',
+            ]
+            
+            for pattern in patterns:
+                if re.search(pattern, text_lower):
+                    return location
+        
+        # Pattern 2: Just location name mentioned (less confident)
+        # Only if it appears at start or after newline (likely location info)
+        for location in self.known_locations:
+            location_lower = location.lower()
+            
+            # Check if location appears at start of text or line
+            pattern = rf'(?:^|\n)\s*{re.escape(location_lower)}\b'
+            if re.search(pattern, text_lower):
+                return location
+        
+        return None
+    
+    def extract_title_from_description(self, text: str, max_length: int = 100) -> str:
+        """
+        Extract a meaningful title from description text.
+        Takes first sentence or first N characters.
+        
+        Args:
+            text: Description text
+            max_length: Maximum title length (default 100)
+            
+        Returns:
+            Extracted title string
+        """
+        if not text:
+            return ""
+        
+        # Clean text
+        text = text.strip()
+        
+        # Try to get first sentence (ending with . ! ? or newline)
+        sentence_match = re.match(r'^([^.!?\n]+[.!?]?)', text)
+        if sentence_match:
+            title = sentence_match.group(1).strip()
+        else:
+            # If no sentence delimiters, take first line or max_length chars
+            lines = text.split('\n')
+            title = lines[0].strip() if lines else text
+        
+        # Truncate if too long
+        if len(title) > max_length:
+            title = title[:max_length].rsplit(' ', 1)[0] + '...'
+        
+        return title
+    
     def extract_phone_numbers(self, text: str) -> List[str]:
         """
         Extract Indonesian phone numbers.
@@ -374,19 +495,18 @@ class PropertyParser:
         phones = [p.strip().replace(' ', '').replace('-', '') for p in phones]
         return list(set(phones))
     
-    def matches_criteria(self, params: Dict, criteria: Dict) -> Tuple[bool, str]:
+    def matches_criteria(self, params: Dict, criteria: Dict, stage: int = 1) -> Tuple[bool, str]:
         """
         Check if parsed parameters match search criteria.
         
         Args:
             params: Parsed parameters
             criteria: Search criteria from config
+            stage: Filter stage (1=basic, 2=detailed with description)
             
         Returns:
             Tuple of (matches: bool, reason: str)
         """
-        # TITLE-LEVEL FILTERS (fast, no deep parsing)
-        
         # 1. Check stop words (land/sale)
         if params.get('has_stop_word'):
             return False, "Stop word: tanah/dijual/sale"
@@ -395,33 +515,35 @@ class PropertyParser:
         if params.get('rental_term') in ['daily', 'weekly']:
             return False, f"Rental term: {params['rental_term']}"
         
-        # 3. Check bedrooms (only 2BR allowed)
+        # 3. Check bedrooms
         bedrooms = params.get('bedrooms')
-        if bedrooms is not None and bedrooms != 2:
-            return False, f"Bedrooms: {bedrooms} (need 2)"
+        if bedrooms is not None:
+            if stage == 1:
+                # Stage 1: Только жесткое отклонение 1BR
+                if bedrooms == 1:
+                    return False, f"Bedrooms: {bedrooms} (need 2+)"
+            elif stage == 2:
+                # Stage 2: Требуем >= 2
+                bedrooms_min = criteria.get('bedrooms_min', 2)
+                if bedrooms < bedrooms_min:
+                    return False, f"Bedrooms: {bedrooms} (need {bedrooms_min}+)"
         
         # 4. Check price range
         price = params.get('price')
         
         if price:
-            # For 2BR: 4M - 14M IDR
-            max_price = criteria.get('default_price', {}).get('max', 14000000)
+            max_price = criteria.get('price_max', criteria.get('default_price', {}).get('max', 16000000))
             if price > max_price:
                 return False, f"Price {price:,.0f} > {max_price:,.0f}"
         
-        # 5. Check kitchen mention (MOVED TO STAGE 2)
-        # Kitchen info often only in full description, not title
-        # if not params.get('has_kitchen'):
-        #     return False, "No kitchen mentioned"
+        # 5. Kitchen check REMOVED - too many false negatives
+        # Kitchen info is often mentioned but not parsed correctly
+        # Will be manually checked by user
         
-        # 6. Check AC (MOVED TO STAGE 2)
-        # AC info often only in full description, not title
-        # if not params.get('has_ac'):
-        #     return False, "No AC"
+        # 6. Check AC (MOVED TO STAGE 3 - LLM)
+        # AC info often only in full description
         
-        # 7. Check WiFi (MOVED TO STAGE 2)
-        # WiFi info often only in full description, not title
-        # if not params.get('has_wifi'):
-        #     return False, "No WiFi"
+        # 7. Check WiFi (MOVED TO STAGE 3 - LLM)
+        # WiFi info often only in full description
         
-        return True, "Passed title filters"
+        return True, "Passed filters"

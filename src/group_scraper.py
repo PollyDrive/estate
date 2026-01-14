@@ -37,6 +37,7 @@ class FacebookGroupScraper:
         logger.info(f"[GROUPS] Starting scrape with actor: {self.ACTOR_ID}")
         
         max_posts_per_group = self.config.get('max_posts_per_group', 15)
+        max_run_time = self.config.get('max_run_time_seconds', 180)
         
         # The actor expects 'startUrls' with group URLs
         start_urls = [{"url": f"https://www.facebook.com/groups/{group_id}/"} for group_id in group_ids]
@@ -52,10 +53,15 @@ class FacebookGroupScraper:
             "proxyConfiguration": { "useApifyProxy": True },
         }
         
+        # Set timeout on actor call (max_run_time in seconds)
         logger.info(f"Actor input: {run_input}")
+        logger.info(f"Max run time: {max_run_time} seconds")
         
         try:
-            run = self.client.actor(self.ACTOR_ID).call(run_input=run_input)
+            run = self.client.actor(self.ACTOR_ID).call(
+                run_input=run_input,
+                timeout_secs=max_run_time
+            )
             
             logger.info(f"Actor run ID: {run['id']}")
             logger.info(f"Actor status: {run['status']}")
@@ -66,11 +72,21 @@ class FacebookGroupScraper:
             logger.info(f"[GROUPS] Fetched {len(items)} total posts.")
             
             # Determine which groups were successfully scraped based on posts returned
+            # Since Apify doesn't return groupId, extract from URLs
             successful_groups = set()
             for item in items:
-                group_id = item.get('groupId')
-                if group_id:
-                    successful_groups.add(str(group_id))
+                url = item.get('url', '')
+                # Extract group ID from URL like https://www.facebook.com/groups/GROUP_ID/...
+                if url and '/groups/' in url:
+                    try:
+                        # Handle both numeric IDs and text slugs
+                        parts = url.split('/groups/')
+                        if len(parts) > 1:
+                            group_part = parts[1].split('/')[0].split('?')[0]
+                            if group_part:
+                                successful_groups.add(group_part)
+                    except Exception as e:
+                        logger.debug(f"Could not extract group ID from URL {url}: {e}")
             
             # Log which groups failed
             failed_groups = set(group_ids) - successful_groups
@@ -128,6 +144,15 @@ class FacebookGroupScraper:
         """
         post_url = raw_post.get('url')
         if not post_url:
+            logger.warning("Post missing URL, skipping")
+            return None
+
+        # Extract text from post
+        text = raw_post.get('text', '').strip()
+        
+        # Validate: post must have text content
+        if not text:
+            logger.warning(f"Post {post_url} has no text content, skipping")
             return None
 
         # Extract a unique ID from the post URL
@@ -146,18 +171,25 @@ class FacebookGroupScraper:
                 fb_id = f"group_post_{raw_post.get('post_id', post_url.replace('/', '_'))}"
 
         except Exception:
+            logger.warning(f"Failed to extract fb_id from {post_url}")
             return None
 
-        text = raw_post.get('text', '')
+        # Extract group_id from URL since Apify doesn't provide it
+        group_id = raw_post.get('groupId')
+        if not group_id and '/groups/' in post_url:
+            try:
+                parts = post_url.split('/groups/')
+                if len(parts) > 1:
+                    group_id = parts[1].split('/')[0].split('?')[0]
+            except Exception:
+                group_id = None
 
         return {
             'fb_id': fb_id,
-            'group_id': raw_post.get('groupId'),
-            'title': text,
+            'group_id': group_id,
+            'title': '',  # Will be extracted from description in Stage 2
             'description': text,
             'listing_url': post_url,
             'price': '',
-            'location': '',
-            'timestamp': raw_post.get('time'),
-            'all_images': raw_post.get('images', [])
+            'location': ''
         }

@@ -140,7 +140,7 @@ def main():
                 # Parse ONLY from description (title can be incorrect/outdated)
                 params = parser.parse(description)
                 
-                # Final criteria check with Stage 2 filters (kitchen required, bedrooms >= 2)
+                # Final criteria check with Stage 2 filters (strict bedrooms >= 4)
                 criterias = config.get('criterias', {})
                 passed, reason = parser.matches_criteria(params, criterias, stage=2)
                 
@@ -205,7 +205,7 @@ def main():
                 # Parse ONLY from description (title can be incorrect/outdated)
                 params = parser.parse(description)
                 
-                # Final criteria check with Stage 2 filters (kitchen required, bedrooms >= 2)
+                # Final criteria check with Stage 2 filters (strict bedrooms >= 4)
                 criterias = config.get('criterias', {})
                 passed, reason = parser.matches_criteria(params, criterias, stage=2)
                 

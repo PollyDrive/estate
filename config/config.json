@@ -2,7 +2,7 @@
   "apify": {
     "max_listings": 200,
     "marketplace_urls": [
-      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?maxPrice=16000000&daysSinceListed=1"
+      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?maxPrice=40000000&daysSinceListed=1"
     ],
     "search_areas": [
       "Abiansemal",
@@ -66,12 +66,12 @@
     ]
   },
   "criterias": {
-    "bedrooms_min": 2,
-    "price_max": 16000000,
+    "bedrooms_min": 4,
+    "price_max": 40000000,
     "default_price": {
-      "max": 16000000,
+      "max": 40000000,
       "currency": "IDR",
-      "note": "Maximum price for 2+ BR"
+      "note": "Maximum price for 4+ BR"
     },
     "allowed_locations": [
       "Abiansemal",
@@ -95,6 +95,31 @@
       "renovation project",
       "client",
       "commercial",
+      "studio",
+      "1br",
+      "2br",
+      "3br",
+      "1 br",
+      "2 br",
+      "3 br",
+      "1 bedroom",
+      "2 bedroom",
+      "3 bedroom",
+      "1 bedrooms",
+      "2 bedrooms",
+      "3 bedrooms",
+      "1 bed",
+      "2 bed",
+      "3 bed",
+      "1 kt",
+      "2 kt",
+      "3 kt",
+      "1kt",
+      "2kt",
+      "3kt",
+      "1 kamar tidur",
+      "2 kamar tidur",
+      "3 kamar tidur",
       "daily",
       "harian",
       "weekly",
@@ -168,14 +193,10 @@
       "forsale"
     ],
     "stop_words_detailed": [
-      "minimum lease 1 year",
       "minimum lease 2 years",
       "minimum lease 3 years",
-      "Minimum 1-year lease",
       "Minimum 2-year lease",
-      "Minimum 3-year lease", 
-      "only yearly lease",
-      "only long term"
+      "Minimum 3-year lease"
     ],
     "stop_locations": [
       "in Kuta",
@@ -191,8 +212,7 @@
       "in Singaraja",
       "in Sanur",
       "in Amed",
-      "in Seminyak",
-      "in Ubud"
+      "in Seminyak"
     ],
     "required_words": [
       "kitchen",
@@ -205,11 +225,38 @@
     ]
   },
   "llm": {
-    "zhipu": {
-      "model": "glm-4",
+    "gemini": {
+      "model": "gemini-1.5-flash",
+      "api_version": "v1alpha",
       "temperature": 0.1,
       "max_tokens": 50,
-      "request_delay": 1.0
+      "request_delay": 1.0,
+      "retry": {
+        "max_retries": 6,
+        "base_delay": 1.0,
+        "max_delay": 30.0,
+        "jitter": 0.15
+      }
+    },
+    "openrouter": {
+      "enabled": true,
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "openrouter/auto",
+      "fallback_models": [
+        "google/gemini-2.0-flash-001",
+        "deepseek/deepseek-r1:free",
+        "z-ai/glm-4.5-air:free",
+        "stepfun/step-3.5-flash:free",
+        "arcee-ai/trinity-large-preview:free"
+      ],
+      "temperature": 0.1,
+      "max_tokens": 50,
+      "retry": {
+        "max_retries": 6,
+        "base_delay": 1.0,
+        "max_delay": 30.0,
+        "jitter": 0.15
+      }
     }
   },
   "telegram": {

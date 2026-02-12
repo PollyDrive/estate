@@ -22,6 +22,7 @@ class Level0Filter:
         # Price rules by bedrooms (from criterias.json)
         self.price_rules = config.get('criterias', {}).get('price_rules', [])
         self.default_price = config.get('criterias', {}).get('default_price', {})
+        self.bedrooms_min = config.get('criterias', {}).get('bedrooms_min', 4)
         
         self.stop_words = [word.lower() for word in config['filters']['stop_words']]
         self.stop_locations = [loc.lower() for loc in config['filters']['stop_locations']]
@@ -228,6 +229,11 @@ class Level0Filter:
         # Check price range (now with bedroom-aware pricing)
         if not self.check_price_range(price, title, description):
             return False, None, "Price out of range"
+
+        # Hard gate: reject only explicit 1/2/3 bedrooms.
+        bedrooms = self.extract_bedrooms(title, description)
+        if bedrooms is not None and bedrooms < self.bedrooms_min:
+            return False, None, f"Bedrooms: {bedrooms} (need {self.bedrooms_min}+)"
         
         # Check stop words
         if not self.check_stop_words(title, description):

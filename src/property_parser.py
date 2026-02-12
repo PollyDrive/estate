@@ -515,18 +515,12 @@ class PropertyParser:
         if params.get('rental_term') in ['daily', 'weekly']:
             return False, f"Rental term: {params['rental_term']}"
         
-        # 3. Check bedrooms
+        # 3. Check bedrooms:
+        # reject only explicit 1/2/3 BR, do not reject unknown bedroom count here.
+        bedrooms_min = criteria.get('bedrooms_min', 4)
         bedrooms = params.get('bedrooms')
-        if bedrooms is not None:
-            if stage == 1:
-                # Stage 1: Только жесткое отклонение 1BR
-                if bedrooms == 1:
-                    return False, f"Bedrooms: {bedrooms} (need 2+)"
-            elif stage == 2:
-                # Stage 2: Требуем >= 2
-                bedrooms_min = criteria.get('bedrooms_min', 2)
-                if bedrooms < bedrooms_min:
-                    return False, f"Bedrooms: {bedrooms} (need {bedrooms_min}+)"
+        if bedrooms is not None and bedrooms < bedrooms_min:
+            return False, f"Bedrooms: {bedrooms} (need {bedrooms_min}+)"
         
         # 4. Check price range
         price = params.get('price')

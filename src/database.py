@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2 import sql
 import logging
 import os
 from typing import Optional, Dict, Any, List
@@ -37,6 +38,7 @@ class Database:
         self.db_name = os.getenv('POSTGRES_DB')
         self.db_user = os.getenv('POSTGRES_USER')
         self.db_password = os.getenv('POSTGRES_PASSWORD')
+        self.db_schema = os.getenv('POSTGRES_SCHEMA')
         self.conn = None
         self.cursor = None
     
@@ -55,6 +57,11 @@ class Database:
                 password=self.db_password
             )
             self.cursor = self.conn.cursor()
+            if self.db_schema:
+                self.cursor.execute(
+                    sql.SQL("SET search_path TO {}, public").format(sql.Identifier(self.db_schema))
+                )
+                logger.info(f"Database search_path set to schema '{self.db_schema}'")
             logger.info("Database connection established")
         except Exception as e:
             logger.error(f"Database connection failed: {e}")

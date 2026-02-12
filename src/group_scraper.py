@@ -42,12 +42,13 @@ class FacebookGroupScraper:
         # The actor expects 'startUrls' with group URLs
         start_urls = [{"url": f"https://www.facebook.com/groups/{group_id}/"} for group_id in group_ids]
         
-        # Calculate total limit based on number of groups and posts per group
+        # Calculate total limit based on number of groups and posts per group.
+        # NOTE: Some actor versions may ignore resultsLimit, but we should not hardcode 100.
         results_limit = len(group_ids) * max_posts_per_group
         
         run_input = {
             "startUrls": start_urls,
-            "resultsLimit": 100,
+            "resultsLimit": results_limit,
             "viewOption": "CHRONOLOGICAL",
             "maxPostCount": max_posts_per_group,
             "proxyConfiguration": { "useApifyProxy": True },

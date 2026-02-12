@@ -7,14 +7,9 @@
   "listing_type": "For Rent",
   "price_rules": [
     {
-      "bedrooms": 1,
-      "min_price": 2000000,
-      "max_price": 6000000
-    },
-    {
-      "bedrooms": 2,
-      "min_price": 4000000,
-      "max_price": 14000000
+      "bedrooms": 4,
+      "min_price": 10000000,
+      "max_price": 40000000
     }
   ],
   "hard_filters_python": {
@@ -23,6 +18,31 @@
       "dapur"
     ],
     "stop_words": [
+      "studio",
+      "1br",
+      "2br",
+      "3br",
+      "1 br",
+      "2 br",
+      "3 br",
+      "1 bedroom",
+      "2 bedroom",
+      "3 bedroom",
+      "1 bedrooms",
+      "2 bedrooms",
+      "3 bedrooms",
+      "1 bed",
+      "2 bed",
+      "3 bed",
+      "1 kt",
+      "2 kt",
+      "3 kt",
+      "1kt",
+      "2kt",
+      "3kt",
+      "1 kamar tidur",
+      "2 kamar tidur",
+      "3 kamar tidur",
       "daily",
       "harian",
       "weekly",

@@ -276,14 +276,14 @@ C4 --> C5
 
 
 
-`docker-compose run --rm bot python3 scripts/run_stage1_manual.py`
+`docker-compose run --rm bot python3 scripts/run_stage1_manual.py`  <!-- запуск съедает ~ 1.3$ -->
 
 • Скрейпит заголовки с Facebook Marketplace через Apify
 • Применяет базовые фильтры
 • Сохраняет новые объявления в БД со статусом stage1_new
 
 ----------------------------------
-`docker-compose run --rm bot python3 scripts/run_group_scrape_manual.py`
+`docker-compose run --rm bot python3 scripts/run_group_scrape_manual.py` <!-- НАДО ОСТАНАВЛИВАТЬ ВРУЧНУЮ запуск съедает ~ 2.5$ -->
 
 • Выбирает 6 групп из списка (те, что давно не скрейпились)
 • Скрейпит до 15 постов из каждой группы
@@ -309,10 +309,10 @@ C4 --> C5
 
 ---------------------------
 
-`docker-compose run --rm bot python3 scripts/run_stage3_groq.py`
+`docker-compose run --rm bot python3 scripts/run_stage3_llm.py`
 
 • Обработает объявления marketplace + groups
-• Проверит через Groq LLM на соответствие критериям
+• Проверит через LLM на соответствие критериям
 • Обновит статусы: stage3 (прошли) или stage3_failed (не прошли)
 
 ------------------

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-STAGE 3: Zhipu LLM Analysis for saved listings
-Analyzes descriptions with Zhipu GLM-4 to check if listing matches criteria.
-Updates fb_listings with analysis results.
+STAGE 3: LLM Analysis for saved listings
+Analyzes descriptions with Gemini to check if listing matches criteria.
+Updates listings with analysis results.
 """
 
 import os
@@ -16,55 +16,56 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from database import Database
-from llm_filters import ZhipuFilter
+from llm_filters import GeminiFilter
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/stage3_zhipu.log'),
+        logging.FileHandler('logs/stage3_llm.log'),
         logging.StreamHandler(sys.stdout)
     ]
 )
 
 logger = logging.getLogger(__name__)
 
+
 def main():
-    """Run Stage 3: Zhipu LLM analysis for unprocessed listings"""
-    
+    """Run Stage 3: LLM analysis for unprocessed listings"""
+
     logger.info("=" * 80)
-    logger.info("STAGE 3: Zhipu GLM-4 Analysis")
+    logger.info("STAGE 3: LLM Analysis (Gemini)")
     logger.info("=" * 80)
-    
+
     # Load environment
     load_dotenv()
-    
+
     # Load config
     config_path = 'config/config.json'
     if not os.path.exists(config_path):
         config_path = '/app/config.json'
-    
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
-    
+
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
-    zhipu_api_key = os.getenv('ZHIPU_API_KEY')
-    
-    if not all([db_url, zhipu_api_key]):
-        logger.error("Missing required environment variables (DATABASE_URL, ZHIPU_API_KEY)!")
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+
+    if not all([db_url, gemini_api_key]):
+        logger.error("Missing required environment variables (DATABASE_URL, GEMINI_API_KEY)!")
         sys.exit(1)
-    
-    # Initialize Zhipu filter
+
+    # Initialize Gemini filter
     try:
-        zhipu_filter = ZhipuFilter(config, zhipu_api_key)
-        logger.info("✓ Zhipu filter initialized")
+        gemini_filter = GeminiFilter(config, gemini_api_key)
+        logger.info("✓ Gemini filter initialized")
     except Exception as e:
-        logger.error(f"✗ Failed to initialize Zhipu filter: {e}")
+        logger.error(f"✗ Failed to initialize Gemini filter: {e}")
         sys.exit(1)
-    
-    # Get listings with status 'stage2' ready for Groq analysis
+
+    # Get listings with status 'stage2' ready for LLM analysis
     with Database() as db:
         query = """
             SELECT fb_id, title, description, location, price, price_extracted,
@@ -73,125 +74,126 @@ def main():
                    utilities, furniture, rental_term, listing_url, source
             FROM listings
             WHERE status = 'stage2'
-            AND description IS NOT NULL 
+            AND description IS NOT NULL
             AND description != ''
             ORDER BY created_at DESC
         """
         db.cursor.execute(query)
         columns = [desc[0] for desc in db.cursor.description]
         listings = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
-    
+
     if not listings:
         logger.warning("No unprocessed listings found")
         logger.info("All listings have been analyzed or don't have descriptions")
         sys.exit(0)
-    
+
     logger.info(f"Found {len(listings)} listings to analyze")
-    
+
     # Process each listing
     passed_count = 0
     failed_count = 0
     error_count = 0
-    
+
     with Database() as db:
         for listing in listings:
             fb_id = listing['fb_id']
             description = listing['description']
             title = listing.get('title') or ''
             location = listing.get('location') or ''
-            
+
             logger.info(f"\nAnalyzing {fb_id}: {title[:50] if title else 'No title'}...")
             logger.info(f"  Location: {location}")
-            
+
             # Check location against stop_locations FIRST
             stop_locations = config.get('filters', {}).get('stop_locations', [])
             location_lower = location.lower() if location else ''
             description_lower = description.lower() if description else ''
-            
+
             passed = True
             reason = None
-            
+
+            # Hard gate: reject only explicit 1/2/3 bedroom listings.
+            bedrooms = listing.get('bedrooms')
+            if bedrooms is not None and bedrooms < 4:
+                passed = False
+                reason = f"REJECT_BEDROOMS (need 4+, got: {bedrooms})"
+                logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
+
             for stop_loc in stop_locations:
+                if not passed:
+                    break
                 # Remove "in " prefix for checking (e.g., "in Ubud" -> "ubud")
                 stop_loc_clean = stop_loc.lower().replace('in ', '').strip()
-                
+
                 # Check both location field and description
                 if stop_loc_clean in location_lower or stop_loc_clean in description_lower:
                     passed = False
                     reason = f"REJECT_LOCATION (stop location: {stop_loc})"
                     logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
                     break
-            
+
             # Check for suspicious short prices (IDR1-IDR999 WITHOUT thousands separator) that likely mean millions
             # This is a SOFT filter - we only reject if price looks very suspicious (>50M equivalent)
             if passed:
                 price = listing.get('price', '')
-                price_extracted = listing.get('price_extracted')
-                
+
                 # If price is short like "IDR25", "IDR150" (without commas/thousands separator)
-                # This catches cases where scraper got "IDR25" but it actually means 25M
                 # We SKIP prices like "IDR25,000" or "IDR295,000" as those have proper formatting
                 if price and isinstance(price, str):
                     import re
-                    # Match ONLY pure short numbers without comma/thousands: "IDR25", "IDR150" etc
-                    # But NOT "IDR25,000" or "IDR295,000"
+
                     match = re.match(r'^IDR\s*(\d{1,3})(?:\s|$)', price)
-                    # Make sure there's no comma after the number (which would indicate thousands)
                     if match and ',' not in price:
                         short_value = int(match.group(1))
-                        
-                        # Check if description has any price indication (relaxed check)
+
                         desc_lower = description.lower()
                         has_price_in_desc = any(indicator in desc_lower for indicator in [
                             'jt', 'juta', 'million', 'mln', 'mio', 'mill', 'm/month', 'm/year',
-                            'jt/bulan', 'jt/tahun', 'jt/', 'm/', 
-                            # Also check for explicit numbers that might indicate actual price
+                            'jt/bulan', 'jt/tahun', 'jt/', 'm/',
                             '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20'
                         ])
-                        
-                        # ONLY reject if price looks VERY suspicious (>50M) AND no price confirmation in description
-                        # Changed threshold from >16 to >50 to reduce false positives
+
                         if short_value > 50 and not has_price_in_desc:
                             passed = False
                             reason = f"REJECT_PRICE (suspicious short price: {price}, likely >{short_value}M, no confirmation in description)"
                             logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
-            
-            # If location check passed, run Zhipu analysis
+
+            # If location check passed, run Gemini analysis
             if passed:
                 try:
-                    passed, reason = zhipu_filter.filter(description)
-                
-                    # Update status based on Zhipu result
+                    passed, reason = gemini_filter.filter(description)
+
+                    # Update status based on Gemini result
                     new_status = 'stage3' if passed else 'stage3_failed'
-                    
+
                     # Save LLM analysis result
                     db.cursor.execute(
                         "UPDATE listings SET status = %s, llm_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
                         (new_status, reason, passed, fb_id)
                     )
                     db.conn.commit()
-                    
+
                     if passed:
                         logger.info(f"  ✓ PASSED: {reason} → status: stage3")
                         passed_count += 1
                     else:
                         logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
                         failed_count += 1
-                        
+
                 except Exception as e:
                     logger.error(f"  ✗ ERROR: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
                     error_count += 1
             else:
-                # Location filtered, update status
+                # Location/bedrooms/price filtered, update status
                 db.cursor.execute(
                     "UPDATE listings SET status = 'stage3_failed', llm_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
                     (reason, False, fb_id)
                 )
                 db.conn.commit()
                 failed_count += 1
-    
+
     # Summary
     logger.info("=" * 80)
     logger.info("STAGE 3 COMPLETE")
@@ -204,5 +206,7 @@ def main():
     logger.info("Command: python3 scripts/run_stage4.py")
     logger.info("=" * 80)
 
+
 if __name__ == '__main__':
     main()
+

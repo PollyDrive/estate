@@ -79,7 +79,7 @@ docker-compose exec -T postgres psql -U realty_user -d realty_bot < db/migration
 Весь код обновлен для работы с новыми названиями колонок:
 - `src/database.py` - методы обновления Stage 3
 - `src/main.py` - получение данных для Telegram
-- `scripts/run_stage3_groq.py` - LLM анализ
+- `scripts/run_stage3_llm.py` - LLM анализ
 - `scripts/run_stage2_manual.py` - извлечение title для групп
 
 ## Итоговая структура данных

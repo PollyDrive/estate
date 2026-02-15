@@ -7,6 +7,7 @@ import logging
 import time
 from typing import List, Dict, Optional
 from apify_client import ApifyClient
+from apify_proxy import build_apify_proxy_config
 
 logger = logging.getLogger(__name__)
 
@@ -143,87 +144,99 @@ class FacebookMarketplaceCheerioScraper:
             logger.warning(f"[STAGE 2] Limiting from {len(listing_urls)} to {max_stage2_items} items (safety limit)")
             listing_urls = listing_urls[:max_stage2_items]
         
-        # Build custom actor input with specific URLs
-        start_urls = [{"url": url} for url in listing_urls]
-        
+        logger.info(f"[STAGE 2] Starting full detail scrape for {len(listing_urls)} URLs")
+
+        # First try a single batched run.
+        items = self._run_stage2_actor(listing_urls)
+        normalized = self._normalize_stage2_items(items, listing_urls)
+        logger.info(f"[STAGE 2] Normalized {len(normalized)} full-detail listings (batched run)")
+
+        # Actor sometimes returns only one item even for many startUrls.
+        # If that happens, fall back to one URL per run to avoid losing 49/50 items.
+        if len(listing_urls) > 1 and len(normalized) <= 1:
+            logger.warning(
+                f"[STAGE 2] Batched scrape returned only {len(normalized)} item(s) for {len(listing_urls)} URLs. "
+                "Falling back to per-URL scraping."
+            )
+            normalized = self._scrape_full_details_per_url(listing_urls)
+            logger.info(f"[STAGE 2] Normalized {len(normalized)} full-detail listings (per-URL fallback)")
+
+        return normalized
+
+    def _build_stage2_actor_input(self, urls: List[str]) -> Dict:
         actor_input = {
-            "startUrls": start_urls,
+            "startUrls": [{"url": u} for u in urls],
             "includeSeller": True,  # Fetch full details including seller
             "monitoringMode": False,  # Not monitoring, just fetching specific URLs
-            "maxItems": len(listing_urls),
+            "maxItems": len(urls),
             "minDelay": self.cheerio_config.get('min_delay', 5),
             "maxDelay": self.cheerio_config.get('max_delay', 10),
             "maxConcurrency": self.cheerio_config.get('max_concurrency', 10),
             "minConcurrency": self.cheerio_config.get('min_concurrency', 1),
             "maxRequestRetries": self.cheerio_config.get('max_request_retries', 100),
         }
-        
-        # Add proxy configuration
+
         proxy_config = self.cheerio_config.get('proxy')
-        if proxy_config:
-            actor_input["proxyConfiguration"] = proxy_config
-        else:
-            actor_input["proxyConfiguration"] = {
-                "useApifyProxy": True,
-                "apifyProxyGroups": ["RESIDENTIAL"]
-            }
-        
-        logger.info(f"[STAGE 2] Starting full detail scrape for {len(listing_urls)} URLs")
-        logger.info(f"Actor input: {actor_input}")
-        
-        try:
-            # Run the actor
-            run = self.client.actor(self.ACTOR_ID).call(run_input=actor_input)
-            
-            logger.info(f"Actor run ID: {run['id']}")
-            logger.info(f"Actor status: {run['status']}")
-            
-            # Fetch results from dataset
-            dataset_id = run['defaultDatasetId']
-            items = list(self.client.dataset(dataset_id).iterate_items())
-            
-            logger.info(f"[STAGE 2] Fetched {len(items)} items with full details")
-            
-            # Create URL mapping for adding missing data
-            # Items are returned in order, but some URLs may have failed
-            # We need to match items with URLs based on title similarity or order
-            url_id_map = {}
-            for url in listing_urls:
-                # Extract ID from URL: .../item/1234567890
-                if '/item/' in url:
-                    fb_id = url.split('/item/')[-1].split('?')[0].split('/')[0]
-                    url_id_map[url] = fb_id
-            
-            logger.info(f"[DEBUG] URL to ID mapping: {len(url_id_map)} URLs")
-            
-            # Normalize listings and inject URL/ID
-            normalized = []
-            url_index = 0  # Track which URL we're processing
-            
-            for i, item in enumerate(items):
-                # Try to find matching URL for this item
-                # Since actor doesn't return URL, we match by order (not perfect but workable)
-                if url_index < len(listing_urls):
-                    injected_url = listing_urls[url_index]
-                    injected_id = url_id_map.get(injected_url)
-                    
-                    # Inject URL and ID into item before normalization
-                    item['_injected_url'] = injected_url
-                    item['_injected_id'] = injected_id
-                    
-                    logger.debug(f"[STAGE 2] Item {i+1}: injecting URL={injected_url}, ID={injected_id}")
-                    url_index += 1
-                
-                listing = self.normalize_listing(item)
-                if listing:
+        actor_input["proxyConfiguration"] = build_apify_proxy_config(proxy_config)
+        return actor_input
+
+    def _run_stage2_actor(self, urls: List[str]) -> List[Dict]:
+        actor_input = self._build_stage2_actor_input(urls)
+        logger.info(f"[STAGE 2] Actor input: startUrls={len(urls)}, maxItems={actor_input.get('maxItems')}")
+
+        run = self.client.actor(self.ACTOR_ID).call(run_input=actor_input)
+        logger.info(f"Actor run ID: {run['id']}")
+        logger.info(f"Actor status: {run['status']}")
+
+        dataset_id = run['defaultDatasetId']
+        items = list(self.client.dataset(dataset_id).iterate_items())
+        logger.info(f"[STAGE 2] Fetched {len(items)} items with full details")
+        return items
+
+    def _normalize_stage2_items(self, items: List[Dict], urls: List[str]) -> List[Dict]:
+        url_id_map = {}
+        for url in urls:
+            if '/item/' in url:
+                fb_id = url.split('/item/')[-1].split('?')[0].split('/')[0]
+                url_id_map[url] = fb_id
+
+        normalized = []
+        url_index = 0
+        for i, item in enumerate(items):
+            if url_index < len(urls):
+                injected_url = urls[url_index]
+                injected_id = url_id_map.get(injected_url)
+                item['_injected_url'] = injected_url
+                item['_injected_id'] = injected_id
+                logger.debug(f"[STAGE 2] Item {i+1}: injecting URL={injected_url}, ID={injected_id}")
+                url_index += 1
+
+            listing = self.normalize_listing(item)
+            if listing:
+                normalized.append(listing)
+        return normalized
+
+    def _scrape_full_details_per_url(self, urls: List[str]) -> List[Dict]:
+        normalized = []
+        seen_fb_ids = set()
+
+        for idx, url in enumerate(urls, start=1):
+            try:
+                logger.info(f"[STAGE 2][fallback] ({idx}/{len(urls)}) Scraping URL: {url}")
+                items = self._run_stage2_actor([url])
+                one_norm = self._normalize_stage2_items(items, [url])
+                for listing in one_norm:
+                    fb_id = listing.get('fb_id')
+                    if fb_id and fb_id in seen_fb_ids:
+                        continue
+                    if fb_id:
+                        seen_fb_ids.add(fb_id)
                     normalized.append(listing)
-            
-            logger.info(f"[STAGE 2] Normalized {len(normalized)} full-detail listings")
-            return normalized
-            
-        except Exception as e:
-            logger.error(f"[STAGE 2] Error running actor: {e}")
-            raise
+            except Exception as e:
+                logger.warning(f"[STAGE 2][fallback] Failed URL {url}: {e}")
+                continue
+
+        return normalized
     
     def _build_actor_input(self) -> Dict:
         """
@@ -270,14 +283,7 @@ class FacebookMarketplaceCheerioScraper:
         
         # Add proxy configuration if specified
         proxy_config = self.cheerio_config.get('proxy')
-        if proxy_config:
-            actor_input["proxyConfiguration"] = proxy_config
-        else:
-            # Default to Apify residential proxy
-            actor_input["proxyConfiguration"] = {
-                "useApifyProxy": True,
-                "apifyProxyGroups": ["RESIDENTIAL"]
-            }
+        actor_input["proxyConfiguration"] = build_apify_proxy_config(proxy_config)
         
         return actor_input
     

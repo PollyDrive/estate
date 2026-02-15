@@ -5,11 +5,13 @@ import random
 import time
 from typing import Dict, Optional, Tuple
 from anthropic import Anthropic
-from google import genai
-from google.genai import types
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+class LLMProcessingError(RuntimeError):
+    """Raised when LLM processing fails and no fallback succeeds."""
 
 
 class OpenRouterClient:
@@ -21,8 +23,11 @@ class OpenRouterClient:
         self.config = config.get("llm", {}).get("openrouter", {}) or {}
         self.api_key = api_key
         self.base_url = self.config.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
-        self.model = self.config.get("model", "openrouter/auto")
+        # self.model = self.config.get("model", "openrouter/auto")
+        self.model = self.config.get("model", "google/gemini-2.0-flash-exp:free")
         self.fallback_models = list(self.config.get("fallback_models", []) or [])
+        self.connect_timeout = float(self.config.get("connect_timeout", 30))
+        self.read_timeout = float(self.config.get("read_timeout", 180))
 
         retry_cfg = self.config.get("retry", {}) or {}
         self.max_retries = int(retry_cfg.get("max_retries", 6))
@@ -48,7 +53,12 @@ class OpenRouterClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=(self.connect_timeout, self.read_timeout),
+        )
         if r.status_code >= 400:
             try:
                 detail = r.json()
@@ -79,8 +89,22 @@ class OpenRouterClient:
                         logger.warning(f"OpenRouter model not found: '{model_to_use}' (try {mi}/{len(models_to_try)})")
                         break
 
-                    # Retry on common transient failures / rate limits.
-                    if ("HTTP 429" in msg) or ("HTTP 503" in msg) or ("HTTP 502" in msg) or ("timeout" in msg.lower()):
+                    # Retry on common transient failures / rate limits / network SSL issues.
+                    msg_lower = msg.lower()
+                    is_transient = (
+                        ("HTTP 429" in msg)
+                        or ("HTTP 503" in msg)
+                        or ("HTTP 502" in msg)
+                        or ("HTTP 504" in msg)
+                        or ("timeout" in msg_lower)
+                        or ("ssl" in msg_lower)
+                        or ("ssleoferror" in msg_lower)
+                        or ("unexpected eof" in msg_lower)
+                        or ("max retries exceeded" in msg_lower)
+                        or ("connection aborted" in msg_lower)
+                        or ("connection reset" in msg_lower)
+                    )
+                    if is_transient:
                         if attempt >= self.max_retries:
                             logger.warning(f"OpenRouter retries exhausted for model '{model_to_use}' (try {mi}/{len(models_to_try)}). Switching model.")
                             break
@@ -96,175 +120,26 @@ class OpenRouterClient:
         return ""
 
 
-class GeminiFilter:
+class OpenRouterFilter:
     """
-    Gemini AI filter using Google GenAI SDK.
+    OpenRouter-based LLM filter.
     Strict categorization of listings based on rental criteria.
     """
     
     def __init__(self, config: Dict, api_key: str):
         """
-        Initialize Gemini filter with API key.
+        Initialize OpenRouter filter with API key.
         
         Args:
             config: Configuration dictionary
-            api_key: Gemini API key
+            api_key: OpenRouter API key
         """
         self.root_config = config
-        self.config = config['llm']['gemini']
-        api_version = self.config.get("api_version") or "v1beta"
-        self.client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(api_version=api_version),
-        )
-        self.model = self.config.get("model")
-        self.request_delay = self.config.get('request_delay', 1.0)
-        self.last_request_time = 0
-
-        retry_cfg = self.config.get("retry", {}) or {}
-        self.max_retries = int(retry_cfg.get("max_retries", 6))
-        self.base_delay = float(retry_cfg.get("base_delay", 1.0))
-        self.max_delay = float(retry_cfg.get("max_delay", 30.0))
-        self.jitter = float(retry_cfg.get("jitter", 0.15))
-
-    def _resolve_model_name(self) -> str:
-        """
-        Resolve a model id to something supported by the current API endpoint.
-        If exact model isn't available, attempt a safe fallback based on ListModels.
-        """
-        requested = self.model
-        if not requested:
-            return "gemini-2.5-flash"
-
-        # Fast path: try requested first
-        return requested
-
-    def _list_model_names(self) -> list[str]:
-        names: list[str] = []
-        try:
-            for m in self.client.models.list():
-                name = getattr(m, "name", None) or ""
-                if name:
-                    # Typical form: "models/gemini-2.5-flash"
-                    names.append(name.split("/")[-1])
-        except Exception as e:
-            logger.warning(f"Could not list Gemini models: {e}")
-        return names
-
-    def _pick_fallback_model(self, available: list[str], requested: str) -> Optional[str]:
-        """
-        Pick the best available model name given a requested one.
-        """
-        if not available:
-            return None
-
-        req = requested.split("/")[-1]
-        candidates = [
-            req,
-            f"{req}-latest",
-            f"{req}-001",
-            f"{req}-002",
-            # Common stable flash models that tend to exist
-            "gemini-2.0-flash-001",
-            "gemini-2.5-flash",
-        ]
-        for cand in candidates:
-            if cand in available:
-                return cand
-
-        # Last resort: pick any flash-ish model.
-        for cand in available:
-            if "flash" in cand:
-                return cand
-
-        return None
-
-    def _get_error_code(self, err: Exception) -> Optional[int]:
-        """
-        Best-effort extraction of HTTP-like error code from Gemini SDK exceptions.
-        """
-        for attr in ("status_code", "code", "status", "http_status"):
-            val = getattr(err, attr, None)
-            if isinstance(val, int):
-                return val
-            if isinstance(val, str) and val.isdigit():
-                return int(val)
-
-        # Sometimes errors are dict-ish inside args
-        try:
-            if err.args:
-                for a in err.args:
-                    if isinstance(a, dict):
-                        for k in ("code", "status_code", "status"):
-                            v = a.get(k)
-                            if isinstance(v, int):
-                                return v
-                            if isinstance(v, str) and v.isdigit():
-                                return int(v)
-        except Exception:
-            pass
-
-        # Fallback: parse message
-        msg = str(err)
-        if " 429" in msg or "429" in msg:
-            return 429
-        if " 503" in msg or "503" in msg:
-            return 503
-        return None
-
-    def _is_retryable(self, err: Exception) -> bool:
-        code = self._get_error_code(err)
-        return code in (429, 500, 502, 503, 504)
-
-    def _sleep_backoff(self, attempt: int, reason: str) -> None:
-        delay = min(self.max_delay, self.base_delay * (2 ** attempt))
-        # jitter: add 0..(delay*jitter)
-        delay = delay + (random.random() * delay * self.jitter)
-        logger.warning(f"Gemini rate-limited/temporary error ({reason}). Backing off {delay:.2f}s (attempt {attempt + 1}/{self.max_retries})")
-        time.sleep(delay)
-
-    def _generate_with_backoff(self, prompt: str):
-        last_err: Optional[Exception] = None
-        model_to_use = self._resolve_model_name()
-        for attempt in range(self.max_retries + 1):
-            try:
-                return self.client.models.generate_content(
-                    model=model_to_use,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=self.config.get("temperature", 0.1),
-                        max_output_tokens=self.config.get("max_tokens", 50),
-                    ),
-                )
-            except Exception as e:
-                last_err = e
-                code = self._get_error_code(e)
-                # If model is not found, try to resolve via ListModels once.
-                if code == 404:
-                    available = self._list_model_names()
-                    fallback = self._pick_fallback_model(available, model_to_use)
-                    if fallback and fallback != model_to_use:
-                        logger.warning(f"Gemini model '{model_to_use}' not found; falling back to '{fallback}'")
-                        model_to_use = fallback
-                        # Immediately retry with the fallback model (no backoff for 404 model resolution).
-                        if attempt < self.max_retries:
-                            continue
-                    else:
-                        logger.error(
-                            "Gemini model not found and no fallback available. "
-                            f"requested='{model_to_use}', available_models_sample={available[:25]}"
-                        )
-                if not self._is_retryable(e) or attempt >= self.max_retries:
-                    raise
-                self._sleep_backoff(attempt, f"code={code}")
-
-        # Should never reach here
-        if last_err:
-            raise last_err
+        self.client = OpenRouterClient(config, api_key)
     
     def filter(self, description: str) -> Tuple[bool, str]:
         """
-        Check if listing passes strict rental criteria using Gemini.
+        Check if listing passes strict rental criteria using OpenRouter.
         
         Args:
             description: Listing description
@@ -272,17 +147,8 @@ class GeminiFilter:
         Returns:
             Tuple of (passed: bool, reason: str)
         """
-        try:
-            # Rate limiting
-            current_time = time.time()
-            time_since_last = current_time - self.last_request_time
-            if time_since_last < self.request_delay:
-                sleep_time = self.request_delay - time_since_last
-                logger.debug(f"Rate limiting: sleeping {sleep_time:.2f}s")
-                time.sleep(sleep_time)
-            
-            # Build prompt from template
-            prompt = f"""You are a very strict real estate filter. Your task is to categorize a listing.
+        # Build prompt from template
+        prompt = f"""You are a very strict real estate filter. Your task is to categorize a listing.
 Respond with ONE category code ONLY.
 
 RULES (check in order):
@@ -377,59 +243,32 @@ Description:
 {description}
 
 CATEGORY:"""
-            
-            response = self._generate_with_backoff(prompt)
-            
-            self.last_request_time = time.time()
-            
-            answer = (getattr(response, "text", None) or "").strip()
-            # Gemini can sometimes return extra text; extract first valid code.
-            import re
-            m = re.search(r"\b(PASS|REJECT_[A-Z_]+)\b", answer)
-            code = m.group(1) if m else answer.strip().splitlines()[0].strip()
-            
-            # Parse response
-            if code == 'PASS':
-                logger.info("Gemini filter: PASS")
-                return True, "Passed all rules"
-            elif code.startswith('REJECT_'):
-                logger.info(f"Gemini filter: {code}")
-                return False, code
-            else:
-                # Unexpected format
-                logger.warning(f"Unexpected Gemini response: {answer}")
-                return False, f"Unexpected response: {answer}"
-                
+
+        try:
+            answer = self.client.generate_text(prompt)
         except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            # Fallback to OpenRouter if configured
-            openrouter_key = os.getenv("OPENROUTER_API_KEY")
-            try:
-                or_cfg = self.root_config.get("llm", {}).get("openrouter", {})
-            except Exception:
-                or_cfg = {}
-            if openrouter_key and (or_cfg.get("enabled", True)):
-                try:
-                    or_client = OpenRouterClient(self.root_config, openrouter_key)
-                    answer = or_client.generate_text(prompt)
-                    import re
-                    m = re.search(r"\b(PASS|REJECT_[A-Z_]+)\b", answer)
-                    code = m.group(1) if m else (answer.strip().splitlines()[0].strip() if answer.strip() else "")
-                    if code == "PASS":
-                        logger.info("OpenRouter fallback: PASS")
-                        return True, "Passed all rules"
-                    if code.startswith("REJECT_"):
-                        logger.info(f"OpenRouter fallback: {code}")
-                        return False, code
-                    return False, f"Unexpected OpenRouter response: {answer}"
-                except Exception as oe:
-                    logger.error(f"OpenRouter fallback error: {oe}")
-            # In case of error, pass to avoid false negatives
-            return True, f"Gemini/OpenRouter error (passed): {str(e)}"
+            raise LLMProcessingError(f"OpenRouter failed: {e}") from e
+
+        answer = (answer or "").strip()
+        import re
+
+        m = re.search(r"\b(PASS|REJECT_[A-Z_]+)\b", answer)
+        code = m.group(1) if m else (answer.splitlines()[0].strip() if answer else "")
+        if not code:
+            raise LLMProcessingError("Empty OpenRouter response")
+
+        if code == "PASS":
+            logger.info("OpenRouter filter: PASS")
+            return True, "Passed all rules"
+        if code.startswith("REJECT_"):
+            logger.info(f"OpenRouter filter: {code}")
+            return False, code
+
+        raise LLMProcessingError(f"Unexpected OpenRouter response: {answer}")
 
 
 # Backwards-compatible alias (avoid breaking older imports)
-ZhipuFilter = GeminiFilter
+ZhipuFilter = OpenRouterFilter
 
 
 def get_llm_filters(config: Dict):
@@ -437,9 +276,9 @@ def get_llm_filters(config: Dict):
     Returns:
         (level1_filter, level2_filter)
     """
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key and config.get("llm", {}).get("gemini"):
-        return GeminiFilter(config, gemini_key), None
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    if openrouter_key and config.get("llm", {}).get("openrouter"):
+        return OpenRouterFilter(config, openrouter_key), None
 
     return None, None
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 STAGE 3: LLM Analysis for saved listings
-Analyzes descriptions with Gemini to check if listing matches criteria.
+Analyzes descriptions with OpenRouter to check if listing matches criteria.
 Updates listings with analysis results.
 """
 
@@ -16,7 +16,7 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from database import Database
-from llm_filters import GeminiFilter
+from llm_filters import OpenRouterFilter
 
 # Setup logging
 logging.basicConfig(
@@ -35,7 +35,7 @@ def main():
     """Run Stage 3: LLM analysis for unprocessed listings"""
 
     logger.info("=" * 80)
-    logger.info("STAGE 3: LLM Analysis (Gemini)")
+    logger.info("STAGE 3: LLM Analysis (OpenRouter)")
     logger.info("=" * 80)
 
     # Load environment
@@ -51,18 +51,18 @@ def main():
 
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
 
-    if not all([db_url, gemini_api_key]):
-        logger.error("Missing required environment variables (DATABASE_URL, GEMINI_API_KEY)!")
+    if not all([db_url, openrouter_api_key]):
+        logger.error("Missing required environment variables (DATABASE_URL, OPENROUTER_API_KEY)!")
         sys.exit(1)
 
-    # Initialize Gemini filter
+    # Initialize OpenRouter filter
     try:
-        gemini_filter = GeminiFilter(config, gemini_api_key)
-        logger.info("✓ Gemini filter initialized")
+        llm_filter = OpenRouterFilter(config, openrouter_api_key)
+        logger.info("✓ OpenRouter filter initialized")
     except Exception as e:
-        logger.error(f"✗ Failed to initialize Gemini filter: {e}")
+        logger.error(f"✗ Failed to initialize OpenRouter filter: {e}")
         sys.exit(1)
 
     # Get listings with status 'stage2' ready for LLM analysis
@@ -158,12 +158,12 @@ def main():
                             reason = f"REJECT_PRICE (suspicious short price: {price}, likely >{short_value}M, no confirmation in description)"
                             logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
 
-            # If location check passed, run Gemini analysis
+            # If location check passed, run OpenRouter analysis
             if passed:
                 try:
-                    passed, reason = gemini_filter.filter(description)
+                    passed, reason = llm_filter.filter(description)
 
-                    # Update status based on Gemini result
+                    # Update status based on LLM result
                     new_status = 'stage3' if passed else 'stage3_failed'
 
                     # Save LLM analysis result
@@ -184,7 +184,14 @@ def main():
                     logger.error(f"  ✗ ERROR: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
-                    error_count += 1
+                    # Stop processing immediately on ANY LLM error.
+                    # Do NOT mark listing as failed; keep it in stage2 for retry after fixing the issue.
+                    try:
+                        db.conn.rollback()
+                    except Exception:
+                        pass
+                    logger.error(f"Stopping Stage 3 due to LLM error (fb_id={fb_id}). Exiting with code 1.")
+                    sys.exit(1)
             else:
                 # Location/bedrooms/price filtered, update status
                 db.cursor.execute(
@@ -205,6 +212,11 @@ def main():
     logger.info("Listings with status 'stage3' are ready for Stage 4 (deduplication)")
     logger.info("Command: python3 scripts/run_stage4.py")
     logger.info("=" * 80)
+
+    # Fail the script if there were any LLM errors (so cron/CI can detect issues).
+    if error_count > 0:
+        logger.error(f"Stage 3 finished with {error_count} LLM errors. Exiting with code 1.")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

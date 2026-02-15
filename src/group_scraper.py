@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Any
 from apify_client import ApifyClient
+from apify_proxy import build_apify_proxy_config
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class FacebookGroupScraper:
             "resultsLimit": results_limit,
             "viewOption": "CHRONOLOGICAL",
             "maxPostCount": max_posts_per_group,
-            "proxyConfiguration": { "useApifyProxy": True },
+            "proxyConfiguration": build_apify_proxy_config(),
         }
         
         # Set timeout on actor call (max_run_time in seconds)

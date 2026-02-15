@@ -2,6 +2,7 @@ import logging
 import os
 from typing import List, Dict, Any
 from apify_client import ApifyClient
+from apify_proxy import build_apify_proxy_config
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +87,7 @@ class ApifyScraper:
                 run_input = {
                     "startUrls": [{"url": url}],
                     "resultsLimit": self.max_listings,
-                    "proxyConfiguration": {
-                        "useApifyProxy": True
-                    }
+                    "proxyConfiguration": build_apify_proxy_config(),
                 }
                 
                 # Start the actor and wait for it to finish
@@ -137,9 +136,7 @@ class ApifyScraper:
         run_input = {
             "startUrls": [{"url": url} for url in self.marketplace_urls],
             "resultsLimit": max_items,
-            "proxyConfiguration": {
-                "useApifyProxy": True
-            }
+            "proxyConfiguration": build_apify_proxy_config(),
         }
         
         logger.info(f"Actor input: {run_input}")

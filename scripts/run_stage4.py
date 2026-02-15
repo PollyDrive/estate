@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 STAGE 4: Deduplication and Russian summary generation
-Groups listings by title, finds full duplicates, generates brief Russian summaries with Zhipu.
+Groups listings by title, finds full duplicates, generates brief Russian summaries with OpenRouter.
 """
 
 import os
@@ -11,8 +11,6 @@ import json
 import time
 from pathlib import Path
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 import random
 
 # Add src to path
@@ -34,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def generate_summary_ru(listing: dict, gemini_client: genai.Client, config: dict, last_request_time: dict) -> str:
+def generate_summary_ru(listing: dict, or_client: OpenRouterClient, config: dict, last_request_time: dict) -> str:
     """
     Generate brief Russian summary using Zhipu GLM-4 with rate limiting.
     
@@ -48,68 +46,9 @@ def generate_summary_ru(listing: dict, gemini_client: genai.Client, config: dict
         Brief Russian summary text
     """
     try:
-        # Get Gemini config
-        gemini_config = config['llm']['gemini']
-        request_delay = gemini_config.get('request_delay', 1.0)
-        retry_cfg = gemini_config.get("retry", {}) or {}
-        max_retries = int(retry_cfg.get("max_retries", 6))
-        base_delay = float(retry_cfg.get("base_delay", 1.0))
-        max_delay = float(retry_cfg.get("max_delay", 30.0))
-        jitter = float(retry_cfg.get("jitter", 0.15))
-
-        def get_error_code(err: Exception):
-            for attr in ("status_code", "code", "status", "http_status"):
-                v = getattr(err, attr, None)
-                if isinstance(v, int):
-                    return v
-                if isinstance(v, str) and v.isdigit():
-                    return int(v)
-            msg = str(err)
-            if "429" in msg:
-                return 429
-            if "503" in msg:
-                return 503
-            return None
-
-        def is_retryable(err: Exception) -> bool:
-            return get_error_code(err) in (429, 500, 502, 503, 504)
-
-        def list_models() -> list[str]:
-            names: list[str] = []
-            try:
-                for m in gemini_client.models.list():
-                    name = getattr(m, "name", None) or ""
-                    if name:
-                        names.append(name.split("/")[-1])
-            except Exception as e:
-                logger.warning(f"Could not list Gemini models: {e}")
-            return names
-
-        def pick_fallback_model(available: list[str], requested: str) -> str | None:
-            if not available:
-                return None
-            req = requested.split("/")[-1]
-            candidates = [
-                req,
-                f"{req}-latest",
-                f"{req}-001",
-                f"{req}-002",
-                "gemini-2.0-flash-001",
-                "gemini-2.5-flash",
-            ]
-            for cand in candidates:
-                if cand in available:
-                    return cand
-            for cand in available:
-                if "flash" in cand:
-                    return cand
-            return None
-
-        def sleep_backoff(attempt: int, code):
-            delay = min(max_delay, base_delay * (2 ** attempt))
-            delay = delay + (random.random() * delay * jitter)
-            logger.warning(f"Gemini temporary error (code={code}). Backing off {delay:.2f}s (attempt {attempt + 1}/{max_retries})")
-            time.sleep(delay)
+        # Get OpenRouter config (rate limit only; retries are inside OpenRouterClient)
+        or_cfg = (config.get("llm", {}) or {}).get("openrouter", {}) or {}
+        request_delay = float(or_cfg.get("request_delay", 1.0))
         
         # Rate limiting: wait before making request
         if last_request_time.get('time'):
@@ -153,55 +92,14 @@ def generate_summary_ru(listing: dict, gemini_client: genai.Client, config: dict
 
 СПИСОК:"""
 
-        model_to_use = gemini_config["model"]
-        response = None
-        last_err = None
-        for attempt in range(max_retries + 1):
-            try:
-                response = gemini_client.models.generate_content(
-                    model=model_to_use,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.1,
-                        max_output_tokens=150,
-                    ),
-                )
-                break
-            except Exception as e:
-                last_err = e
-                code = get_error_code(e)
-                if code == 404:
-                    available = list_models()
-                    fallback = pick_fallback_model(available, model_to_use)
-                    if fallback and fallback != model_to_use and attempt < max_retries:
-                        logger.warning(f"Gemini model '{model_to_use}' not found; falling back to '{fallback}'")
-                        model_to_use = fallback
-                        continue
-                if not is_retryable(e) or attempt >= max_retries:
-                    raise
-                sleep_backoff(attempt, code)
-        if response is None and last_err:
-            raise last_err
-        
+        summary = or_client.generate_text(prompt, model=or_cfg.get("model"))
+
         # Update last request time
         last_request_time['time'] = time.time()
-        
-        summary = (getattr(response, "text", None) or "").strip()
-        return summary
+        return (summary or "").strip()
         
     except Exception as e:
-        logger.error(f"Gemini summary error for {listing.get('fb_id')}: {e}")
-        # Fallback to OpenRouter if configured
-        openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        or_cfg = config.get("llm", {}).get("openrouter", {}) or {}
-        if openrouter_key and or_cfg.get("enabled", True):
-            try:
-                or_client = OpenRouterClient(config, openrouter_key)
-                summary = or_client.generate_text(prompt, model=or_cfg.get("model"))
-                if summary:
-                    return summary
-            except Exception as oe:
-                logger.error(f"OpenRouter summary fallback error for {listing.get('fb_id')}: {oe}")
+        logger.error(f"OpenRouter summary error for {listing.get('fb_id')}: {e}")
         # Fallback to description snippet
         desc = listing.get('description', 'Нет описания')[:150]
         return f"Описание: {desc}..."
@@ -227,24 +125,21 @@ def main():
     
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
     
-    if not all([db_url, gemini_api_key]):
-        logger.error("Missing required environment variables (DATABASE_URL, GEMINI_API_KEY)!")
+    if not all([db_url, openrouter_api_key]):
+        logger.error("Missing required environment variables (DATABASE_URL, OPENROUTER_API_KEY)!")
         sys.exit(1)
     
-    # Initialize Gemini client (default SDK uses beta endpoints; allow override via config)
-    api_version = config.get("llm", {}).get("gemini", {}).get("api_version") or "v1beta"
-    gemini_client = genai.Client(
-        api_key=gemini_api_key,
-        http_options=types.HttpOptions(api_version=api_version),
-    )
-    logger.info("✓ Gemini client initialized")
+    # Initialize OpenRouter client (Gemini removed)
+    or_client = OpenRouterClient(config, openrouter_api_key)
+    logger.info("✓ OpenRouter client initialized")
     
     # Get listings with status 'stage3'
     with Database() as db:
         query = """
             SELECT fb_id, title, description, location, price, price_extracted,
+                   created_at,
                    phone_number, bedrooms, listing_url, source
             FROM listings
             WHERE status = 'stage3'
@@ -288,7 +183,7 @@ def main():
                 logger.info(f"\nProcessing unique: {fb_id}")
                 
                 # Generate Russian summary
-                summary_ru = generate_summary_ru(listing, gemini_client, config, last_request_time)
+                summary_ru = generate_summary_ru(listing, or_client, config, last_request_time)
                 logger.info(f"  Summary: {summary_ru[:100]}...")
                 
                 # Update with summary and status
@@ -302,62 +197,50 @@ def main():
                 summaries_generated += 1
                 
             else:
-                # Multiple listings with same title - check for full duplicates
+                # Multiple listings with same title - split into exact-content buckets.
                 logger.info(f"\nChecking {len(group)} listings with title: {title[:50]}...")
-                
-                # Compare each pair
-                processed_in_group = set()
-                
-                for i, listing1 in enumerate(group):
-                    fb_id1 = listing1['fb_id']
-                    
-                    if fb_id1 in processed_in_group:
-                        continue
-                    
-                    is_duplicate = False
-                    
-                    for j, listing2 in enumerate(group[i+1:], start=i+1):
-                        fb_id2 = listing2['fb_id']
-                        
-                        if fb_id2 in processed_in_group:
-                            continue
-                        
-                        # Check for FULL match: description, location, price
-                        if (listing1.get('description') == listing2.get('description') and
-                            listing1.get('location') == listing2.get('location') and
-                            listing1.get('price_extracted') == listing2.get('price_extracted')):
-                            
-                            # Full duplicate found
-                            logger.info(f"  ✗ DUPLICATE: {fb_id2} is duplicate of {fb_id1}")
-                            
-                            db.cursor.execute(
-                                "UPDATE listings SET status = 'stage4_duplicate' WHERE fb_id = %s",
-                                (fb_id2,)
-                            )
-                            db.conn.commit()
-                            
-                            processed_in_group.add(fb_id2)
-                            duplicates_found += 1
-                            is_duplicate = True
-                    
-                    # If this is not a duplicate, generate summary
-                    if not is_duplicate and fb_id1 not in processed_in_group:
-                        logger.info(f"  ✓ UNIQUE: {fb_id1}")
-                        
-                        # Generate Russian summary
-                        summary_ru = generate_summary_ru(listing1, gemini_client, config, last_request_time)
-                        logger.info(f"    Summary: {summary_ru[:100]}...")
-                        
-                        # Update with summary and status
+
+                duplicate_buckets = {}
+                for listing in group:
+                    key = (
+                        listing.get('description'),
+                        listing.get('location'),
+                        listing.get('price_extracted'),
+                    )
+                    duplicate_buckets.setdefault(key, []).append(listing)
+
+                for bucket in duplicate_buckets.values():
+                    # Keep the oldest row as canonical/original.
+                    bucket_sorted = sorted(
+                        bucket,
+                        key=lambda x: (x.get('created_at') is None, x.get('created_at'), str(x.get('fb_id'))),
+                    )
+                    canonical = bucket_sorted[0]
+                    canonical_fb_id = canonical['fb_id']
+
+                    logger.info(f"  ✓ CANONICAL: {canonical_fb_id}")
+                    summary_ru = generate_summary_ru(canonical, or_client, config, last_request_time)
+                    logger.info(f"    Summary: {summary_ru[:100]}...")
+
+                    db.cursor.execute(
+                        "UPDATE listings SET summary_ru = %s, status = 'stage4' WHERE fb_id = %s",
+                        (summary_ru, canonical_fb_id)
+                    )
+                    db.conn.commit()
+
+                    unique_count += 1
+                    summaries_generated += 1
+
+                    # Mark remaining rows as duplicates of canonical.
+                    for dup in bucket_sorted[1:]:
+                        dup_fb_id = dup['fb_id']
+                        logger.info(f"  ✗ DUPLICATE: {dup_fb_id} is duplicate of {canonical_fb_id}")
                         db.cursor.execute(
-                            "UPDATE listings SET summary_ru = %s, status = 'stage4' WHERE fb_id = %s",
-                            (summary_ru, fb_id1)
+                            "UPDATE listings SET status = 'stage4_duplicate' WHERE fb_id = %s",
+                            (dup_fb_id,)
                         )
                         db.conn.commit()
-                        
-                        processed_in_group.add(fb_id1)
-                        unique_count += 1
-                        summaries_generated += 1
+                        duplicates_found += 1
     
     # Summary
     logger.info("=" * 80)

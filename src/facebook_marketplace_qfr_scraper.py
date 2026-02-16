@@ -21,21 +21,26 @@ class FacebookMarketplaceQfrScraper:
         self.client = ApifyClient(api_key)
         self.config = config or {}
         self.cfg = (self.config.get("marketplace_qfr") or {})
-        logger.info("FacebookMarketplaceQfrScraper initialized (actor=%s)", self.ACTOR_ID)
+        self.actor_id = self.cfg.get("actor_id") or self.ACTOR_ID
+        logger.info("FacebookMarketplaceQfrScraper initialized (actor=%s)", self.actor_id)
 
-    def scrape_full_details(self, listing_urls: List[str], max_stage2_items: int = 50) -> List[Dict[str, Any]]:
-        if not listing_urls:
+    def scrape_marketplace(self, start_urls: List[str], max_listings: int = 50) -> List[Dict[str, Any]]:
+        """
+        Scrape marketplace results/details from search/category URLs.
+        Direct /marketplace/item/... URLs are unreliable for this actor.
+        """
+        if not start_urls:
             return []
 
-        urls = listing_urls[:max_stage2_items]
-        if len(listing_urls) > max_stage2_items:
-            logger.warning("[QFR] Limiting from %s to %s items", len(listing_urls), max_stage2_items)
+        urls = start_urls
+        if max_listings and max_listings > 0:
+            logger.info("[QFR] max_listings=%s", max_listings)
 
-        run_input = self._build_actor_input(urls)
-        logger.info("[QFR] Starting scrape for %s URLs", len(urls))
+        run_input = self._build_actor_input(urls, max_listings=max_listings)
+        logger.info("[QFR] Starting scrape for %s start URLs", len(urls))
         logger.info("[QFR] Actor input keys: %s", list(run_input.keys()))
 
-        run = self.client.actor(self.ACTOR_ID).call(run_input=run_input)
+        run = self.client.actor(self.actor_id).call(run_input=run_input)
         logger.info("[QFR] Actor run ID: %s", run.get("id"))
         logger.info("[QFR] Actor status: %s", run.get("status"))
 
@@ -44,30 +49,29 @@ class FacebookMarketplaceQfrScraper:
         logger.info("[QFR] Fetched %s items from dataset", len(items))
 
         normalized: List[Dict[str, Any]] = []
-        for idx, raw in enumerate(items):
+        for raw in items:
             listing = self.normalize_listing(raw)
             if listing:
-                # Best-effort URL injection by order if actor omits URL.
-                if not listing.get("listing_url") and idx < len(urls):
-                    listing["listing_url"] = urls[idx]
                 normalized.append(listing)
 
         logger.info("[QFR] Normalized %s listings", len(normalized))
         return normalized
 
-    def _build_actor_input(self, urls: List[str]) -> Dict[str, Any]:
+    def _build_actor_input(self, urls: List[str], *, max_listings: int) -> Dict[str, Any]:
         """
         Based on actor documentation summary and common Apify Marketplace patterns.
         """
         run_input: Dict[str, Any] = {
             "startUrls": [{"url": u} for u in urls],
-            "maxItems": len(urls),
-            "fetchDetails": True,
-            "getNewItems": True,
-            "proxyConfiguration": build_apify_proxy_config(
-                self.cfg.get("proxy"),
-                country="Indonesia",
-            ),
+            # Keep both keys for actor compatibility across updates.
+            "maxItems": max_listings,
+            "maxListings": max_listings,
+            # UI runs that returned rich payloads used fetchDetails-enabled output.
+            "fetchDetails": bool(self.cfg.get("fetchDetails", True)),
+            "getNewItems": bool(self.cfg.get("getNewItems", True)),
+            "proxyConfiguration": build_apify_proxy_config(self.cfg.get("proxy")),
+            # Actor validates ISO country codes, not full names.
+            "proxyCountry": self.cfg.get("proxyCountry", "ID"),
         }
         # Optional knobs (only if configured)
         if self.cfg.get("sortBy"):
@@ -85,13 +89,25 @@ class FacebookMarketplaceQfrScraper:
             return None
 
         fb_id = self._extract_fb_id(raw)
-        title = self._s(raw, "marketplace_listing_title") or self._s(raw, "headline") or self._s(raw, "title")
-        description = (
-            self._s(raw, "marketplace_listing_description")
-            or self._s(raw, "description")
-            or self._s(raw, "fullDescription")
+        title = (
+            self._s(raw, "title")
+            or self._s(raw, "custom_title")
+            or self._s(raw, "marketplace_listing_title")
+            or self._s(raw, "headline")
         )
-        listing_url = self._s(raw, "listingUrl") or self._s(raw, "url") or self._s(raw, "permalink")
+        description = (
+            self._s(raw, "description")
+            or self._s(raw, "fullDescription")
+            or self._s(raw, "marketplace_listing_description")
+            or self._s(raw, "custom_title")
+            or self._s(raw, "custom_sub_titles_with_rendering_flags")
+        )
+        listing_url = (
+            self._s(raw, "url")
+            or self._s(raw, "listingUrl")
+            or self._s(raw, "permalink")
+            or self._s(raw, "itemUrl")
+        )
         price = self._extract_price(raw)
         location = self._extract_location(raw)
 
@@ -121,17 +137,50 @@ class FacebookMarketplaceQfrScraper:
         return None
 
     def _extract_price(self, raw: Dict[str, Any]) -> str:
+        p = raw.get("price")
+        if isinstance(p, dict):
+            return (
+                self._s(p, "formatted")
+                or self._s(p, "formatted_amount_zeros_stripped")
+                or self._s(p, "formatted_amount")
+                or self._s(p, "amount")
+                or ""
+            )
         p = raw.get("listing_price")
         if isinstance(p, dict):
             return self._s(p, "formatted_amount_zeros_stripped") or self._s(p, "formatted_amount") or ""
+        fp = self._s(raw, "formatted_price")
+        if fp:
+            return fp
         return self._s(raw, "price")
 
     def _extract_location(self, raw: Dict[str, Any]) -> str:
         loc = raw.get("location")
         if isinstance(loc, dict):
+            rd = loc.get("reverse_geocode_detailed") or {}
+            if isinstance(rd, dict):
+                city = self._s(rd, "city")
+                state = self._s(rd, "state")
+                if city and state:
+                    return f"{city}, {state}"
+                if city:
+                    return city
+                if state:
+                    return state
             rg = loc.get("reverse_geocode") or {}
             if isinstance(rg, dict):
                 return self._s(rg, "city") or self._s(rg, "display_name") or self._s(rg, "state")
+            full = self._s(loc, "full")
+            city = self._s(loc, "city")
+            state = self._s(loc, "state")
+            if full:
+                return full
+            if city and state:
+                return f"{city}, {state}"
+            if city:
+                return city
+            if state:
+                return state
             return self._s(loc, "text") or self._s(loc, "name")
         return self._s(raw, "location_text") or self._s(raw, "location")
 
@@ -146,6 +195,17 @@ class FacebookMarketplaceQfrScraper:
                     return str(v.get(k))
             return ""
         if isinstance(v, list):
-            return ", ".join(str(x) for x in v if x)
+            parts: List[str] = []
+            for x in v:
+                if not x:
+                    continue
+                if isinstance(x, dict):
+                    for k in ("text", "label", "value", "name"):
+                        if x.get(k):
+                            parts.append(str(x.get(k)))
+                            break
+                else:
+                    parts.append(str(x))
+            return ", ".join(parts)
         return str(v)
 

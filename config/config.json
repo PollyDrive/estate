@@ -4,17 +4,12 @@
     "marketplace_urls": [
       "https://www.facebook.com/marketplace/107286902636860/propertyrentals?maxPrice=40000000&daysSinceListed=1"
     ],
-    "search_areas": [
-      "Abiansemal",
-      "Singakerta",
-      "Mengwi"
-    ],
     "enabled": true
   },
   "marketplace_cheerio": {
     "enabled": true,
     "marketplace_urls": [
-      "https://www.facebook.com/marketplace/item/1514733676311943"
+      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?maxPrice=40000000&daysSinceListed=1"
     ],
     "include_seller": true,
     "monitoring_mode": true,
@@ -25,7 +20,6 @@
     "max_concurrency": 10,
     "min_concurrency": 1,
     "max_request_retries": 2,
-    "cookies_file": "/app/cookies/cookies_clean.txt",
     "proxy": {
       "useApifyProxy": false,
       "apifyProxyGroups": ["RESIDENTIAL"]
@@ -34,7 +28,13 @@
   "marketplace_qfr": {
     "enabled": true,
     "actor_id": "qFR6mjgdwPouKLDvE",
+    "start_urls": [
+      "https://www.facebook.com/marketplace/107286902636860/search/?query=4%20beds&exact=false"
+    ],
     "max_stage2_items": 50,
+    "fetchDetails": true,
+    "getNewItems": true,
+    "proxyCountry": "ID",
     "proxy": {
       "useApifyProxy": false,
       "apifyProxyGroups": [
@@ -47,7 +47,6 @@
     "rate_limit_seconds": 30,
     "max_posts_per_group": 15,
     "max_run_time_seconds": 180,
-    "cookies_file": "/app/cookies/cookies_clean.txt",
     "groups": [
       "UbudHousingRental",
       "canggucommunityhousing",
@@ -80,9 +79,7 @@
     "bedrooms_min": 4,
     "price_max": 40000000,
     "default_price": {
-      "max": 40000000,
-      "currency": "IDR",
-      "note": "Maximum price for 4+ BR"
+      "max": 40000000
     },
     "allowed_locations": [
       "Abiansemal",
@@ -97,7 +94,24 @@
       "Sibang Gede",
       "Tibubeneng",
       "Padonan", 
-      "Canggu"
+      "Canggu", 
+      "Ubud",
+      "Kuta",
+      "Seminyak",
+      "Sanur",
+      "Legian",
+      "Denpasar",
+      "Tabanan",
+      "Kediri",
+      "Munggu",
+      "Tanah Lot",
+      "Tegallalang",
+      "Payangan",
+      "Petulu",
+      "Mas",
+      "Lodtunduh",
+      "Sukawati",
+      "Celuk"
     ]
   },
   "filters": {
@@ -210,7 +224,6 @@
       "Minimum 3-year lease"
     ],
     "stop_locations": [
-      "in Kuta",
       "in Uluwatu",
       "in Semarapura",
       "in Candidasa",
@@ -219,11 +232,13 @@
       "in Buleleng",
       "in Jimbaran",
       "in Nusa Dua",
+      "Nusa Dua",
       "in Lovina",
       "in Singaraja",
-      "in Sanur",
-      "in Amed",
-      "in Seminyak"
+      "Ungasan",
+      "Karangasem",
+      "in Karangasem",
+      "in Amed"
     ],
     "required_words": [
       "kitchen",
@@ -233,31 +248,50 @@
     "phone_regex": [
       "\\+?62\\s?8\\d{2}[\\s-]?\\d{3,4}[\\s-]?\\d{3,4}",
       "08\\d{2}[\\s-]?\\d{3,4}[\\s-]?\\d{3,4}"
-    ]
+    ],
+    "stage5_guard": {
+      "enabled": true,
+      "max_price": 40000000,
+      "blocked_locations": [
+        "karangasem"
+      ],
+      "duplicate_check": true,
+      "duplicate_reason": "REJECT_STAGE5: duplicate phone/location/bedrooms",
+      "regex_rules": [
+        {
+          "reason": "REJECT_STAGE5: minimum lease term 15 years",
+          "fields": ["title", "description", "location"],
+          "regex": "minimum\\s+lease\\s+term\\s+15\\s+years|minimum\\s+lease\\s+15\\s+years|\\b15\\s+years?\\b"
+        },
+        {
+          "reason": "REJECT_STAGE5: room/kos type listing",
+          "fields": ["title", "description"],
+          "regex": "d\\s*trima\\s*kos|terima\\s*kos|kosan|kost|private\\s+room|room\\s+for\\s+rent"
+        },
+        {
+          "reason": "REJECT_STAGE5: non-Bali US location",
+          "fields": ["title", "description", "location"],
+          "regex": "new york|brooklyn|queens|bronx|manhattan|jersey city|new jersey|\\busa\\b|united states"
+        },
+        {
+          "reason": "REJECT_STAGE5: suspicious 100,000,000 price",
+          "fields": ["price"],
+          "regex": "100[\\s\\.,]*000[\\s\\.,]*000"
+        }
+      ]
+    }
   },
   "llm": {
-    "gemini": {
-      "model": "gemini-1.5-flash-002",
-      "temperature": 0.1,
-      "max_tokens": 50,
-      "request_delay": 1.0,
-      "retry": {
-        "max_retries": 3,
-        "base_delay": 1.0,
-        "max_delay": 20.0,
-        "jitter": 0.15
-      }
-    },
     "openrouter": {
       "enabled": true,
       "base_url": "https://openrouter.ai/api/v1",
-      "model": "qwen/qwen-2.5-72b-instruct:free",
+      "model": "google/gemini-2.0-flash-001",
       "fallback_models": [
-        "google/gemini-2.0-flash-001:free",
-        "tngtech/deepseek-r1t2-chimera:free",
-        "meta-llama/llama-3.1-8b-instruct:free",
-        "z-ai/glm-4.5-air:free",
-        "google/gemini-2.0-flash-001"
+        "openai/gpt-5-nano",
+        "qwen/qwen3-235b-a22b-2507",
+        "stepfun/step-3.5-flash:free",
+        "arcee-ai/trinity-large-preview:free",
+        "deepseek/deepseek-r1-0528:free"
       ],
       "temperature": 0.1,
       "max_tokens": 100,

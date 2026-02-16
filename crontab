@@ -20,8 +20,8 @@
 # 2 runs per day (60 runs/month - conservative option):
 # 0 10,18 * * * cd /app && /usr/local/bin/python3 /app/src/main.py >> /var/log/cron.log 2>&1
 
-# Telegram notifications: Send listings every 30 minutes (Stage 5)
-*/30 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage5.py >> /var/log/telegram_cron.log 2>&1
+# Full pipeline every 30 minutes (strict sequence)
+*/30 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_group_scrape_manual.py && /usr/local/bin/python3 /app/scripts/run_stage2_manual.py && /usr/local/bin/python3 /app/scripts/run_stage2_manual_qfr.py && /usr/local/bin/python3 /app/scripts/run_stage3_llm.py && /usr/local/bin/python3 /app/scripts/run_stage4.py && /usr/local/bin/python3 /app/scripts/run_stage5.py >> /var/log/pipeline_cron.log 2>&1
 
 # Empty line required at end of crontab file
 

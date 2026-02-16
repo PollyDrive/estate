@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-STAGE 2 (alternative): Full detail scraping with actor qFR6mjgdwPouKLDvE.
-Keeps legacy Cheerio stage2 script untouched.
+STAGE 2 (QFR, search-driven):
+- Accepts a Marketplace search URL from CLI
+- Scrapes detailed listings via actor qFR6mjgdwPouKLDvE
+- Upserts found listings into DB with status='stage2'
 """
 
 import json
@@ -55,73 +57,49 @@ def main():
 
     parser = PropertyParser()
     qfr_scraper = FacebookMarketplaceQfrScraper(apify_key, config)
+    qfr_cfg = config.get("marketplace_qfr", {}) or {}
 
-    with Database() as db:
-        db.cursor.execute(
-            """
-            SELECT fb_id, listing_url, source, description
-            FROM listings
-            WHERE status IN ('stage1', 'stage1_new')
-            ORDER BY created_at DESC
-            """
-        )
-        cols = [d[0] for d in db.cursor.description]
-        listings_to_process = [dict(zip(cols, row)) for row in db.cursor.fetchall()]
-
-    if not listings_to_process:
-        logger.warning("No listings with status stage1/stage1_new")
-        return
-
-    logger.info("Found %s listings to process", len(listings_to_process))
-
-    groups_with_description = [
-        l for l in listings_to_process if l["source"] == "facebook_group" and l.get("description")
-    ]
-    groups_no_description = [
-        l for l in listings_to_process if l["source"] == "facebook_group" and not l.get("description")
-    ]
-    marketplace_listings = [
-        l for l in listings_to_process if l["source"] in ("marketplace", "apify", "apify-marketplace", None, "")
-    ]
-
-    logger.info("  Groups with description: %s", len(groups_with_description))
-    logger.info("  Groups without description: %s", len(groups_no_description))
-    logger.info("  Marketplace listings: %s", len(marketplace_listings))
-
-    # Stage 2 should only process concrete item URLs, not search/unavailable pages.
-    raw_urls = [c["listing_url"] for c in marketplace_listings if c.get("listing_url")]
-    candidate_urls = [u for u in raw_urls if "/marketplace/item/" in u]
-    skipped_bad_urls = len(raw_urls) - len(candidate_urls)
-    if skipped_bad_urls:
-        logger.warning(
-            "Skipped %s marketplace URLs that are not item links (e.g. unavailable/search pages).",
-            skipped_bad_urls,
-        )
+    # QFR actor is search-oriented in practice.
+    # Read all runtime settings from marketplace_qfr config.
+    start_urls = list(qfr_cfg.get("start_urls") or [])
     stage2_listings = []
-    if candidate_urls:
-        max_stage2 = int(config.get("marketplace_qfr", {}).get("max_stage2_items", 50))
-        logger.info("Scraping full details via QFR actor (max %s items)...", max_stage2)
+    if start_urls:
+        max_stage2 = int(qfr_cfg.get("max_stage2_items", 50))
+        logger.info(
+            "Scraping marketplace via QFR actor (maxListings=%s, startUrls=%s)...",
+            max_stage2,
+            len(start_urls),
+        )
         try:
-            stage2_listings = qfr_scraper.scrape_full_details(candidate_urls, max_stage2_items=max_stage2)
-            logger.info("✓ Scraped %s full listings", len(stage2_listings))
+            stage2_listings = qfr_scraper.scrape_marketplace(start_urls, max_listings=max_stage2)
+            logger.info("✓ Scraped %s marketplace listings", len(stage2_listings))
         except Exception as e:
             logger.error("✗ Error scraping with QFR actor: %s", e, exc_info=True)
+    else:
+        logger.warning("No marketplace_qfr.start_urls configured")
 
     stop_words_detailed = config.get("filters", {}).get("stop_words_detailed", [])
     stop_words_detailed_lower = [w.lower() for w in stop_words_detailed]
-    criterias = config.get("criterias", {})
-
     processed_count = 0
-    updated_count = 0
+    upserted_count = 0
 
     with Database() as db:
-        # Marketplace rows from actor result
+        # Upsert all listings found from this search URL as stage2.
         for listing in stage2_listings:
-            processed_count += 1
             fb_id = listing.get("fb_id")
+            listing_url = listing.get("listing_url", "") or ""
             if not fb_id:
-                logger.warning("Scraped listing missing fb_id, skip")
+                if "/marketplace/item/" in listing_url:
+                    fb_id = listing_url.split("/marketplace/item/")[-1].split("?")[0].split("/")[0]
+                    listing["fb_id"] = fb_id
+                if not listing_url:
+                    logger.warning("Scraped listing missing fb_id and listing_url, skip")
+                    continue
+            if not fb_id:
+                logger.warning("Could not resolve fb_id for listing URL: %s", listing_url)
                 continue
+
+            processed_count += 1
 
             description = listing.get("description", "") or ""
 
@@ -134,108 +112,85 @@ def main():
                         break
 
             if found_stop:
-                new_status = "stage2_failed"
                 reason = f"Detailed stop word: {found_stop}"
                 params = {}
             else:
                 params = parser.parse(description)
-                passed, reason = parser.matches_criteria(params, criterias, stage=2)
-                new_status = "stage2" if passed else "stage2_failed"
+                reason = "QFR detailed import from search URL"
 
             location_extracted = parser.extract_location(description) if description else None
             phones = parser.extract_phone_numbers(description) if description else []
             phone = phones[0] if phones else None
 
-            update = {
-                "title": listing.get("title", ""),
-                "description": description,
-                "price": listing.get("price", ""),
-                "location": listing.get("location", ""),
-                "listing_url": listing.get("listing_url", ""),
-                "source": "apify-marketplace",
-                "phone_number": phone,
-                "bedrooms": params.get("bedrooms"),
-                "price_extracted": params.get("price"),
-                "has_ac": params.get("has_ac", False),
-                "has_wifi": params.get("has_wifi", False),
-                "has_pool": params.get("has_pool", False),
-                "has_parking": params.get("has_parking", False),
-                "utilities": params.get("utilities"),
-                "furniture": params.get("furniture"),
-                "rental_term": params.get("rental_term"),
-                "location_extracted": location_extracted,
-                "status": new_status,
-                "pass_reason": reason,
-            }
-            set_clause = ", ".join([f"{k} = %s" for k in update.keys()])
-            values = list(update.values()) + [fb_id]
-            db.cursor.execute(f"UPDATE listings SET {set_clause}, updated_at = NOW() WHERE fb_id = %s", tuple(values))
-            db.conn.commit()
-            updated_count += 1
-
-        # Existing group flow remains the same as old stage2_manual
-        logger.info("\nProcessing %s Groups with existing description...", len(groups_with_description))
-        for listing in groups_with_description:
-            processed_count += 1
-            fb_id = listing["fb_id"]
-            description = listing["description"] or ""
-            extracted_title = parser.extract_title_from_description(description, max_length=150)
-            location_extracted = parser.extract_location(description) if description else None
-
-            found_stop = None
-            if description and stop_words_detailed_lower:
-                low = description.lower()
-                for sw in stop_words_detailed_lower:
-                    if sw in low:
-                        found_stop = sw
-                        break
-
-            if found_stop:
-                new_status = "stage2_failed"
-                reason = f"Detailed stop word: {found_stop}"
-                params = {}
-            else:
-                params = parser.parse(description)
-                passed, reason = parser.matches_criteria(params, criterias, stage=2)
-                new_status = "stage2" if passed else "stage2_failed"
-
-            phones = parser.extract_phone_numbers(description) if description else []
-            phone = phones[0] if phones else None
-            update = {
-                "title": extracted_title,
-                "phone_number": phone,
-                "bedrooms": params.get("bedrooms"),
-                "price_extracted": params.get("price"),
-                "has_ac": params.get("has_ac", False),
-                "has_wifi": params.get("has_wifi", False),
-                "location_extracted": location_extracted,
-                "status": new_status,
-                "pass_reason": reason,
-            }
-            set_clause = ", ".join([f"{k} = %s" for k in update.keys()])
-            values = list(update.values()) + [fb_id]
-            db.cursor.execute(f"UPDATE listings SET {set_clause}, updated_at = NOW() WHERE fb_id = %s", tuple(values))
-            db.conn.commit()
-            updated_count += 1
-
-        logger.info("\nProcessing %s Groups without description...", len(groups_no_description))
-        for listing in groups_no_description:
-            processed_count += 1
-            fb_id = listing["fb_id"]
+            # Do not overwrite listings that already progressed beyond stage2.
+            upsert_query = """
+                INSERT INTO listings (
+                    fb_id, title, description, price, location, listing_url, source,
+                    phone_number, bedrooms, price_extracted, has_ac, has_wifi, has_pool, has_parking,
+                    utilities, furniture, rental_term, location_extracted, status, pass_reason, updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, NOW()
+                )
+                ON CONFLICT (fb_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    price = EXCLUDED.price,
+                    location = EXCLUDED.location,
+                    listing_url = EXCLUDED.listing_url,
+                    source = EXCLUDED.source,
+                    phone_number = EXCLUDED.phone_number,
+                    bedrooms = EXCLUDED.bedrooms,
+                    price_extracted = EXCLUDED.price_extracted,
+                    has_ac = EXCLUDED.has_ac,
+                    has_wifi = EXCLUDED.has_wifi,
+                    has_pool = EXCLUDED.has_pool,
+                    has_parking = EXCLUDED.has_parking,
+                    utilities = EXCLUDED.utilities,
+                    furniture = EXCLUDED.furniture,
+                    rental_term = EXCLUDED.rental_term,
+                    location_extracted = EXCLUDED.location_extracted,
+                    status = EXCLUDED.status,
+                    pass_reason = EXCLUDED.pass_reason,
+                    updated_at = NOW()
+                WHERE listings.status IN ('stage1', 'stage1_new', 'stage2', 'stage2_failed', 'no_description')
+            """
             db.cursor.execute(
-                "UPDATE listings SET status = %s, updated_at = NOW() WHERE fb_id = %s",
-                ("no_description", fb_id),
+                upsert_query,
+                (
+                    fb_id,
+                    listing.get("title", ""),
+                    description,
+                    listing.get("price", ""),
+                    listing.get("location", ""),
+                    listing_url,
+                    "apify-marketplace",
+                    phone,
+                    params.get("bedrooms"),
+                    params.get("price"),
+                    params.get("has_ac", False),
+                    params.get("has_wifi", False),
+                    params.get("has_pool", False),
+                    params.get("has_parking", False),
+                    params.get("utilities"),
+                    params.get("furniture"),
+                    params.get("rental_term"),
+                    location_extracted,
+                    "stage2",
+                    reason,
+                ),
             )
             db.conn.commit()
-            updated_count += 1
+            upserted_count += 1
 
     logger.info("=" * 80)
     logger.info("STAGE 2 (QFR) COMPLETE")
     logger.info("Processed: %s", processed_count)
-    logger.info("Updated in DB: %s", updated_count)
+    logger.info("Upserted in DB: %s", upserted_count)
     logger.info("  - Marketplace scraped: %s", len(stage2_listings))
-    logger.info("  - Groups with description: %s", len(groups_with_description))
-    logger.info("  - Groups without description: %s", len(groups_no_description))
+    logger.info("  - Search URLs: %s", start_urls)
     logger.info("=" * 80)
 
 

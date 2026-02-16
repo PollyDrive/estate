@@ -1,10 +1,10 @@
 {
-  "search_areas": [
-    "Abiansemal",
-    "Singakerta",
-    "Mengwi"
-  ],
-  "listing_type": "For Rent",
+  "bedrooms_min": 4,
+  "price_max": 40000000,
+  "default_price": {
+    "min": 10000000,
+    "max": 40000000
+  },
   "price_rules": [
     {
       "bedrooms": 4,
@@ -12,64 +12,36 @@
       "max_price": 40000000
     }
   ],
-  "hard_filters_python": {
-    "must_have_keywords": [
-      "kitchen",
-      "dapur"
-    ],
-    "stop_words": [
-      "studio",
-      "1br",
-      "2br",
-      "3br",
-      "1 br",
-      "2 br",
-      "3 br",
-      "1 bedroom",
-      "2 bedroom",
-      "3 bedroom",
-      "1 bedrooms",
-      "2 bedrooms",
-      "3 bedrooms",
-      "1 bed",
-      "2 bed",
-      "3 bed",
-      "1 kt",
-      "2 kt",
-      "3 kt",
-      "1kt",
-      "2kt",
-      "3kt",
-      "1 kamar tidur",
-      "2 kamar tidur",
-      "3 kamar tidur",
-      "daily",
-      "harian",
-      "weekly",
-      "mingguan",
-      "shared kitchen",
-      "dapur bersama",
-      "no kitchen",
-      "outdoor kitchen"
-    ]
-  },
-  "llm_filters": {
-    "must_haves": [
-      "AC",
-      "Wifi"
-    ],
-    "kitchen_type_preferred": [
-      "closed kitchen",
-      "enclosed kitchen",
-      "separate kitchen"
-    ],
-    "kitchen_type_acceptable": [
-      "indoor kitchen"
-    ],
-    "payment_term_preferred": "monthly",
-    "summary_points": [
-      "bills included/excluded",
-      "furniture status (fully/semi/unfurnished)"
-    ]
-  }
+  "allowed_locations": [
+    "Abiansemal",
+    "Singakerta",
+    "Mengwi",
+    "Pererenan",
+    "Berawa",
+    "Umalas",
+    "Seseh",
+    "Tumbak Bayuh",
+    "Buduk",
+    "Sibang Gede",
+    "Tibubeneng",
+    "Padonan",
+    "Canggu",
+    "Ubud",
+    "Kuta",
+    "Seminyak",
+    "Sanur",
+    "Legian",
+    "Denpasar",
+    "Tabanan",
+    "Kediri",
+    "Munggu",
+    "Tanah Lot",
+    "Tegallalang",
+    "Payangan",
+    "Petulu",
+    "Mas",
+    "Lodtunduh",
+    "Sukawati",
+    "Celuk"
+  ]
 }

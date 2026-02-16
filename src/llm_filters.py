@@ -66,7 +66,15 @@ class OpenRouterClient:
                 detail = r.text
             raise RuntimeError(f"OpenRouter HTTP {r.status_code}: {detail}")
         data = r.json()
-        return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"OpenRouter empty choices: {data}")
+
+        message = (choices[0].get("message", {}) or {})
+        content = (message.get("content") or "").strip()
+        if not content:
+            raise RuntimeError(f"OpenRouter empty content: {data}")
+        return content
 
     def generate_text(self, prompt: str, *, model: Optional[str] = None) -> str:
         primary = model or self.model
@@ -103,6 +111,8 @@ class OpenRouterClient:
                         or ("max retries exceeded" in msg_lower)
                         or ("connection aborted" in msg_lower)
                         or ("connection reset" in msg_lower)
+                        or ("empty choices" in msg_lower)
+                        or ("empty content" in msg_lower)
                     )
                     if is_transient:
                         if attempt >= self.max_retries:

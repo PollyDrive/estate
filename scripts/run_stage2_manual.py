@@ -8,6 +8,7 @@ scrapes full details, and updates them with the results and a new status.
 import os
 import sys
 import logging
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 import json
@@ -30,6 +31,27 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+SUSPICIOUS_TITLE_PATTERNS = [
+    (r"\bprivate\s+room\b", "private_room"),
+    (r"\broom\s+for\s+rent\b", "room_for_rent"),
+    (r"\bwarung\b", "warung"),
+    (r"\bkuliner\b", "kuliner"),
+    (r"\bstand\s+kuliner\b", "stand_kuliner"),
+    (r"\btoko\b", "toko"),
+    (r"\bruko\b", "ruko"),
+    (r"\bkost\b", "kost"),
+    (r"\bboarding\b", "boarding"),
+    (r"\boffice\b", "office"),
+]
+
+
+def _suspicious_title_reason(title: str) -> str | None:
+    t = (title or "").lower()
+    for pattern, label in SUSPICIOUS_TITLE_PATTERNS:
+        if re.search(pattern, t):
+            return label
+    return None
 
 def main():
     """Run Stage 2: Full detail scraping for candidates"""
@@ -58,13 +80,13 @@ def main():
         sys.exit(1)
     
     # Initialize components
-    parser = PropertyParser()
+    parser = PropertyParser(config)
     cheerio_scraper = FacebookMarketplaceCheerioScraper(apify_key, config)
     
     # Get unprocessed candidates from DB
     with Database() as db:
         # Get all stage1 listings
-        query = "SELECT fb_id, listing_url, source, description FROM listings WHERE status IN ('stage1', 'stage1_new') ORDER BY created_at DESC"
+        query = "SELECT fb_id, title, listing_url, source, description FROM listings WHERE status IN ('stage1', 'stage1_new') ORDER BY created_at DESC"
         db.cursor.execute(query)
         columns = [desc[0] for desc in db.cursor.description]
         listings_to_process = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
@@ -84,8 +106,80 @@ def main():
     logger.info(f"  Groups without description: {len(groups_no_description)}")
     logger.info(f"  Marketplace listings: {len(marketplace_listings)}")
     
-    # Extract URLs for marketplace scraping
-    candidate_urls = [c['listing_url'] for c in marketplace_listings]
+    # Pre-clean stage1 marketplace queue before spending Cheerio credits.
+    criterias = config.get('criterias', {})
+    candidate_urls = []
+    prefiltered_rejected = 0
+    seen_urls = set()
+    with Database() as db:
+        for listing in marketplace_listings:
+            fb_id = listing.get('fb_id')
+            title = listing.get('title') or ''
+            listing_url = (listing.get('listing_url') or '').strip()
+
+            if not listing_url or '/marketplace/item/' not in listing_url:
+                db.cursor.execute(
+                    """
+                    UPDATE listings
+                    SET status = 'stage2_failed',
+                        pass_reason = %s,
+                        updated_at = NOW()
+                    WHERE fb_id = %s AND status IN ('stage1', 'stage1_new')
+                    """,
+                    ("Pre-Cheerio reject: invalid marketplace item URL", fb_id),
+                )
+                prefiltered_rejected += db.cursor.rowcount
+                continue
+
+            suspicious = _suspicious_title_reason(title)
+            if suspicious:
+                db.cursor.execute(
+                    """
+                    UPDATE listings
+                    SET status = 'stage2_failed',
+                        pass_reason = %s,
+                        updated_at = NOW()
+                    WHERE fb_id = %s AND status IN ('stage1', 'stage1_new')
+                    """,
+                    (f"Pre-Cheerio reject: suspicious title ({suspicious})", fb_id),
+                )
+                prefiltered_rejected += db.cursor.rowcount
+                continue
+
+            title_params = parser.parse(title)
+            title_ok, title_reason = parser.matches_criteria(title_params, criterias, stage=1)
+            if not title_ok:
+                db.cursor.execute(
+                    """
+                    UPDATE listings
+                    SET status = 'stage2_failed',
+                        pass_reason = %s,
+                        bedrooms = %s,
+                        price_extracted = %s,
+                        updated_at = NOW()
+                    WHERE fb_id = %s AND status IN ('stage1', 'stage1_new')
+                    """,
+                    (
+                        f"Pre-Cheerio title filter: {title_reason}",
+                        title_params.get('bedrooms'),
+                        title_params.get('price'),
+                        fb_id,
+                    ),
+                )
+                prefiltered_rejected += db.cursor.rowcount
+                continue
+
+            if listing_url not in seen_urls:
+                seen_urls.add(listing_url)
+                candidate_urls.append(listing_url)
+
+        db.conn.commit()
+
+    logger.info(
+        "Pre-Cheerio cleanup: rejected=%s, remaining candidates=%s",
+        prefiltered_rejected,
+        len(candidate_urls),
+    )
     
     # STAGE 2: Scrape full details for marketplace
     stage2_listings = []
@@ -141,7 +235,6 @@ def main():
                 params = parser.parse(description)
                 
                 # Final criteria check with Stage 2 filters (strict bedrooms >= 4)
-                criterias = config.get('criterias', {})
                 passed, reason = parser.matches_criteria(params, criterias, stage=2)
                 
                 new_status = 'stage2' if passed else 'stage2_failed'
@@ -183,6 +276,7 @@ def main():
             processed_count += 1
             fb_id = listing['fb_id']
             description = listing['description']
+            params = {}
             
             # Extract title and location from description for groups
             extracted_title = parser.extract_title_from_description(description, max_length=150)
@@ -206,7 +300,6 @@ def main():
                 params = parser.parse(description)
                 
                 # Final criteria check with Stage 2 filters (strict bedrooms >= 4)
-                criterias = config.get('criterias', {})
                 passed, reason = parser.matches_criteria(params, criterias, stage=2)
                 
                 new_status = 'stage2' if passed else 'stage2_failed'

@@ -8,6 +8,7 @@ Updates listings with analysis results.
 import os
 import sys
 import logging
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 import json
@@ -29,6 +30,12 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_reject_type(reason: str) -> str:
+    text = (reason or "").strip()
+    m = re.search(r"\b(REJECT_[A-Z_]+)\b", text)
+    return m.group(1) if m else "REJECT_UNKNOWN"
 
 
 def main():
@@ -65,7 +72,8 @@ def main():
         logger.error(f"✗ Failed to initialize OpenRouter filter: {e}")
         sys.exit(1)
 
-    # Get listings with status 'stage2' ready for LLM analysis
+    # Get listings with status 'stage2' ready for LLM analysis.
+    # Description is preferred, but we also support title-only fallback.
     with Database() as db:
         query = """
             SELECT fb_id, title, description, location, price, price_extracted,
@@ -74,8 +82,6 @@ def main():
                    utilities, furniture, rental_term, listing_url, source
             FROM listings
             WHERE status = 'stage2'
-            AND description IS NOT NULL
-            AND description != ''
             ORDER BY created_at DESC
         """
         db.cursor.execute(query)
@@ -93,21 +99,38 @@ def main():
     passed_count = 0
     failed_count = 0
     error_count = 0
+    criterias = config.get('criterias', {}) or {}
+    max_price = float(criterias.get('price_max', 40000000))
+    enforce_stop_locations = bool(config.get('filters', {}).get('enforce_stop_locations', False))
 
     with Database() as db:
         for listing in listings:
             fb_id = listing['fb_id']
-            description = listing['description']
+            description = listing.get('description') or ''
             title = listing.get('title') or ''
             location = listing.get('location') or ''
+            llm_text = description.strip() if description and description.strip() else title.strip()
+            text_mode = "description" if description and description.strip() else "title-only"
 
             logger.info(f"\nAnalyzing {fb_id}: {title[:50] if title else 'No title'}...")
             logger.info(f"  Location: {location}")
+            logger.info(f"  Mode: {text_mode}")
+
+            if not llm_text:
+                reason = "REJECT_NO_TEXT (both description and title are empty)"
+                db.cursor.execute(
+                    "UPDATE listings SET status = 'stage3_failed', llm_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
+                    (reason, False, fb_id)
+                )
+                db.conn.commit()
+                failed_count += 1
+                logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
+                continue
 
             # Check location against stop_locations FIRST
             stop_locations = config.get('filters', {}).get('stop_locations', [])
             location_lower = location.lower() if location else ''
-            description_lower = description.lower() if description else ''
+            llm_text_lower = llm_text.lower() if llm_text else ''
 
             passed = True
             reason = None
@@ -125,51 +148,56 @@ def main():
                 # Remove "in " prefix for checking (e.g., "in Ubud" -> "ubud")
                 stop_loc_clean = stop_loc.lower().replace('in ', '').strip()
 
-                # Check both location field and description
-                if stop_loc_clean in location_lower or stop_loc_clean in description_lower:
-                    passed = False
-                    reason = f"REJECT_LOCATION (stop location: {stop_loc})"
-                    logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
+                # Check both location field and currently used LLM text.
+                if stop_loc_clean in location_lower or stop_loc_clean in llm_text_lower:
+                    if enforce_stop_locations:
+                        passed = False
+                        reason = f"REJECT_LOCATION (stop location: {stop_loc})"
+                        logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
+                    else:
+                        logger.info(
+                            f"  ⚠ stop location matched ({stop_loc}) but enforce_stop_locations=false, continue to LLM"
+                        )
                     break
 
-            # Check for suspicious short prices (IDR1-IDR999 WITHOUT thousands separator) that likely mean millions
-            # This is a SOFT filter - we only reject if price looks very suspicious (>50M equivalent)
-            if passed:
-                price = listing.get('price', '')
-
-                # If price is short like "IDR25", "IDR150" (without commas/thousands separator)
-                # We SKIP prices like "IDR25,000" or "IDR295,000" as those have proper formatting
-                if price and isinstance(price, str):
-                    import re
-
-                    match = re.match(r'^IDR\s*(\d{1,3})(?:\s|$)', price)
-                    if match and ',' not in price:
-                        short_value = int(match.group(1))
-
-                        desc_lower = description.lower()
-                        has_price_in_desc = any(indicator in desc_lower for indicator in [
-                            'jt', 'juta', 'million', 'mln', 'mio', 'mill', 'm/month', 'm/year',
-                            'jt/bulan', 'jt/tahun', 'jt/', 'm/',
-                            '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20'
-                        ])
-
-                        if short_value > 50 and not has_price_in_desc:
-                            passed = False
-                            reason = f"REJECT_PRICE (suspicious short price: {price}, likely >{short_value}M, no confirmation in description)"
-                            logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
+            # Suspicious short prices are no longer hard-rejected here.
+            # Let the LLM decide these cases to avoid false negatives.
 
             # If location check passed, run OpenRouter analysis
             if passed:
                 try:
-                    passed, reason = llm_filter.filter(description)
+                    passed, reason = llm_filter.filter(llm_text)
+                    reject_type = _extract_reject_type(reason)
+
+                    # Deterministic overrides for known false negatives.
+                    if not passed and reject_type == "REJECT_BEDROOMS":
+                        bedrooms = listing.get('bedrooms')
+                        if bedrooms is not None and bedrooms >= 4:
+                            passed = True
+                            reason = f"PASS_OVERRIDE_BEDROOMS (structured bedrooms={bedrooms})"
+                            reject_type = ""
+
+                    if not passed and reject_type == "REJECT_PRICE":
+                        extracted_price = listing.get('price_extracted')
+                        try:
+                            extracted_price_f = float(extracted_price) if extracted_price is not None else None
+                        except Exception:
+                            extracted_price_f = None
+                        if extracted_price_f is not None and extracted_price_f <= max_price:
+                            passed = True
+                            reason = (
+                                f"PASS_OVERRIDE_PRICE (structured price={extracted_price_f:.0f} <= {max_price:.0f})"
+                            )
+                            reject_type = ""
 
                     # Update status based on LLM result
                     new_status = 'stage3' if passed else 'stage3_failed'
+                    pass_reason = reason if passed else f"{_extract_reject_type(reason)} | {reason}"
 
                     # Save LLM analysis result
                     db.cursor.execute(
-                        "UPDATE listings SET status = %s, llm_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
-                        (new_status, reason, passed, fb_id)
+                        "UPDATE listings SET status = %s, llm_reason = %s, pass_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
+                        (new_status, reason, pass_reason, passed, fb_id)
                     )
                     db.conn.commit()
 
@@ -194,9 +222,10 @@ def main():
                     sys.exit(1)
             else:
                 # Location/bedrooms/price filtered, update status
+                pass_reason = f"{_extract_reject_type(reason)} | {reason}"
                 db.cursor.execute(
-                    "UPDATE listings SET status = 'stage3_failed', llm_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
-                    (reason, False, fb_id)
+                    "UPDATE listings SET status = 'stage3_failed', llm_reason = %s, pass_reason = %s, llm_passed = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
+                    (reason, pass_reason, False, fb_id)
                 )
                 db.conn.commit()
                 failed_count += 1

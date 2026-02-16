@@ -58,11 +58,16 @@ def generate_summary_ru(listing: dict, or_client: OpenRouterClient, config: dict
                 logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
                 time.sleep(wait_time)
         
+        title = str(listing.get('title') or 'N/A')
+        price = str(listing.get('price') or 'N/A')
+        location = str(listing.get('location') or 'N/A')
+        description = str(listing.get('description') or 'N/A')
+
         # Build full description with metadata
-        full_text = f"""Заголовок: {listing.get('title', 'N/A')}
-Цена: {listing.get('price', 'N/A')}
-Локация: {listing.get('location', 'N/A')}
-Описание: {listing.get('description', 'N/A')[:800]}"""
+        full_text = f"""Заголовок: {title}
+Цена: {price}
+Локация: {location}
+Описание: {description[:800]}"""
         
         # Prompt for structured list format (strict template)
         prompt = f"""Извлеки из объявления ключевую информацию и верни СТРОГО в формате списка с маркерами.
@@ -101,7 +106,7 @@ def generate_summary_ru(listing: dict, or_client: OpenRouterClient, config: dict
     except Exception as e:
         logger.error(f"OpenRouter summary error for {listing.get('fb_id')}: {e}")
         # Fallback to description snippet
-        desc = listing.get('description', 'Нет описания')[:150]
+        desc = str(listing.get('description') or 'Нет описания')[:150]
         return f"Описание: {desc}..."
 
 

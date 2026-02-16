@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -117,6 +118,132 @@ def format_no_description_batch(listings: list) -> str:
         message += f"  🔗 {url}\n\n"
     
     return message.strip()
+
+
+def build_pipeline_stats_message(db: Database) -> str:
+    """
+    Build cumulative pipeline stats message.
+
+    Format requested by user:
+    Всего обработано объявлений: <n>
+    Распределение по этапам:
+    filter_failed: <n>
+    llm_failed: <n>
+    duplicates: <n>
+    sent: <n>
+    no_description queue: <n>
+    """
+    db.cursor.execute("SELECT COUNT(*) FROM listings")
+    listings_total = int(db.cursor.fetchone()[0] or 0)
+
+    # Use one non-listings table to avoid double counting mirrored records.
+    db.cursor.execute("SELECT COUNT(*) FROM listing_non_relevant")
+    non_listings_total = int(db.cursor.fetchone()[0] or 0)
+
+    db.cursor.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'stage2_failed') AS filter_failed,
+            COUNT(*) FILTER (WHERE status = 'stage3_failed') AS llm_failed,
+            COUNT(*) FILTER (WHERE status = 'stage4_duplicate') AS duplicates_cnt,
+            COUNT(*) FILTER (WHERE status = 'stage5_sent') AS sent_cnt,
+            COUNT(*) FILTER (
+                WHERE status = 'no_description'
+                  AND (telegram_sent IS NULL OR telegram_sent = FALSE)
+            ) AS no_description_queue
+        FROM listings
+        """
+    )
+    row = db.cursor.fetchone() or (0, 0, 0, 0, 0)
+    filter_failed, llm_failed, duplicates_cnt, sent_cnt, no_description_queue = [int(x or 0) for x in row]
+
+    total_processed = listings_total + non_listings_total
+    return (
+        f"Всего обработано объявлений: {total_processed}\n"
+        "Распределение по этапам:\n"
+        f"filter_failed: {filter_failed}\n"
+        f"llm_failed: {llm_failed}\n"
+        f"duplicates: {duplicates_cnt}\n"
+        f"sent: {sent_cnt}\n"
+        f"no_description queue: {no_description_queue}"
+    )
+
+
+def stage5_guard_reason(listing: dict, config: dict, db: Database) -> str | None:
+    """
+    Final safety net before Telegram sending.
+    Returns reject reason string if listing must be blocked, otherwise None.
+    """
+    filters_cfg = config.get("filters", {}) or {}
+    guard_cfg = filters_cfg.get("stage5_guard", {}) or {}
+    if not bool(guard_cfg.get("enabled", True)):
+        return None
+
+    title = str(listing.get("title") or "")
+    description = str(listing.get("description") or "")
+    location = str(listing.get("location") or "")
+    price_text = str(listing.get("price") or "")
+    phone = str(listing.get('phone_number') or '').strip()
+    bedrooms = listing.get('bedrooms')
+    price_extracted = listing.get('price_extracted')
+    listing_payload = {
+        "title": title,
+        "description": description,
+        "location": location,
+        "price": price_text,
+    }
+
+    regex_rules = guard_cfg.get("regex_rules", []) or []
+    for rule in regex_rules:
+        pattern = str(rule.get("regex") or "").strip()
+        reason = str(rule.get("reason") or "REJECT_STAGE5: regex rule")
+        fields = rule.get("fields") or ["title", "description", "location", "price"]
+        if not pattern:
+            continue
+        try:
+            haystack = "\n".join(str(listing_payload.get(f, "")) for f in fields)
+            if re.search(pattern, haystack, re.IGNORECASE):
+                return reason
+        except re.error:
+            logger.warning(f"Invalid regex in filters.stage5_guard.regex_rules: {pattern}")
+
+    blocked_locations = [str(x).strip().lower() for x in (guard_cfg.get("blocked_locations") or []) if str(x).strip()]
+    location_joined = f"{title}\n{description}\n{location}".lower()
+    for blocked in blocked_locations:
+        if blocked and blocked in location_joined:
+            return f"REJECT_STAGE5: blocked location {blocked}"
+
+    try:
+        max_price = float(guard_cfg.get("max_price", config.get("criterias", {}).get("price_max", 40000000)))
+    except Exception:
+        max_price = 40000000.0
+
+    try:
+        if price_extracted is not None and float(price_extracted) > max_price:
+            return f"REJECT_STAGE5: price_extracted>{int(max_price)}"
+    except Exception:
+        pass
+
+    # Duplicate protection: same phone+location+bedrooms already sent.
+    duplicate_check_enabled = bool(guard_cfg.get("duplicate_check", True))
+    if duplicate_check_enabled and phone:
+        db.cursor.execute(
+            """
+            SELECT 1
+            FROM listings
+            WHERE status = 'stage5_sent'
+              AND fb_id <> %s
+              AND COALESCE(phone_number, '') = %s
+              AND COALESCE(location, '') = %s
+              AND COALESCE(bedrooms, -1) = COALESCE(%s, -1)
+            LIMIT 1
+            """,
+            (listing.get('fb_id'), phone, location, bedrooms),
+        )
+        if db.cursor.fetchone():
+            return str(guard_cfg.get("duplicate_reason") or "REJECT_STAGE5: duplicate phone/location/bedrooms")
+
+    return None
 
 
 def check_and_send_no_description(db: Database, notifier: TelegramNotifier) -> int:
@@ -243,6 +370,7 @@ def main():
     
     sent_count = 0
     error_count = 0
+    blocked_count = 0
     
     db = Database()
     db.connect()
@@ -265,7 +393,8 @@ def main():
         if total_unsent > 0:
             logger.info(f"\nFetching up to {batch_size} OLDEST unsent listings...")
             query = """
-                SELECT fb_id, title, summary_ru, price, phone_number, listing_url, created_at
+                SELECT fb_id, title, summary_ru, price, phone_number, listing_url, created_at,
+                       description, location, bedrooms, price_extracted, pass_reason, llm_reason
                 FROM listings
                 WHERE status = 'stage4'
                   AND (telegram_sent IS NULL OR telegram_sent = FALSE)
@@ -286,6 +415,26 @@ def main():
                 fb_id = listing['fb_id']
                 
                 try:
+                    guard_reason = stage5_guard_reason(listing, config, db)
+                    if guard_reason:
+                        db.cursor.execute(
+                            """
+                            UPDATE listings
+                            SET status = 'stage3_failed',
+                                llm_reason = %s,
+                                pass_reason = %s,
+                                llm_passed = FALSE,
+                                llm_analyzed_at = NOW(),
+                                updated_at = NOW()
+                            WHERE fb_id = %s
+                            """,
+                            (guard_reason, guard_reason, fb_id),
+                        )
+                        db.conn.commit()
+                        blocked_count += 1
+                        logger.warning(f"✗ [{i}/{len(listings)}] BLOCKED by stage5 guard: {fb_id} | {guard_reason}")
+                        continue
+
                     message = format_regular_message(listing)
                     
                     # Send to Telegram
@@ -323,6 +472,7 @@ def main():
             logger.info("REGULAR LISTINGS BATCH COMPLETE")
             logger.info(f"Successfully sent: {sent_count}")
             logger.info(f"Errors: {error_count}")
+            logger.info(f"Blocked by Stage5 guard: {blocked_count}")
             logger.info(f"Remaining unsent: {remaining}")
             
             if remaining > 0:
@@ -342,6 +492,17 @@ def main():
         logger.info(f"No-description listings sent: {no_desc_sent}")
         logger.info(f"Total sent: {sent_count + no_desc_sent}")
         logger.info("=" * 80)
+
+        # Send cumulative pipeline stats after each batch run.
+        try:
+            stats_message = build_pipeline_stats_message(db)
+            stats_ok = notifier.send_message(stats_message)
+            if stats_ok:
+                logger.info("✓ Pipeline stats message sent")
+            else:
+                logger.warning("✗ Failed to send pipeline stats message")
+        except Exception as e:
+            logger.warning(f"✗ Could not build/send pipeline stats message: {e}")
         
     finally:
         db.close()

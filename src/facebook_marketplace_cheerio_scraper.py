@@ -266,21 +266,6 @@ class FacebookMarketplaceCheerioScraper:
             "maxRequestRetries": self.cheerio_config.get('max_request_retries', 100),
         }
         
-        # Add cookies if specified
-        cookies_file = self.cheerio_config.get('cookies_file')
-        if cookies_file:
-            try:
-                import os
-                if os.path.exists(cookies_file):
-                    with open(cookies_file, 'r') as f:
-                        cookies_raw = f.read()
-                    actor_input["cookies"] = cookies_raw
-                    logger.info(f"Added cookies from {cookies_file}")
-                else:
-                    logger.warning(f"Cookies file not found: {cookies_file}")
-            except Exception as e:
-                logger.warning(f"Could not load cookies: {e}")
-        
         # Add proxy configuration if specified
         proxy_config = self.cheerio_config.get('proxy')
         actor_input["proxyConfiguration"] = build_apify_proxy_config(proxy_config)

@@ -155,19 +155,19 @@ class Database:
             logger.error(f"Error getting listings for Stage 3: {e}")
             return []
 
-    def update_listing_after_stage3(self, fb_id: str, llm_passed: bool, llm_reason: str):
+    def update_listing_after_stage3(self, fb_id: str, llm_passed: bool, llm_reason: str, llm_model: str = None):
         """
         Updates a listing with the results of the LLM analysis (Stage 3).
         """
         query = """
-            UPDATE listings 
-            SET status = %s, llm_passed = %s, llm_reason = %s, llm_analyzed_at = NOW()
+            UPDATE listings
+            SET status = %s, llm_passed = %s, llm_reason = %s, llm_model = %s, llm_analyzed_at = NOW()
             WHERE fb_id = %s
         """
         try:
-            self.cursor.execute(query, (STATUS_STAGE3_ANALYZED, llm_passed, llm_reason, fb_id))
+            self.cursor.execute(query, (STATUS_STAGE3_ANALYZED, llm_passed, llm_reason, llm_model, fb_id))
             self.conn.commit()
-            logger.info(f"Stage 3: Updated listing {fb_id} with LLM analysis results.")
+            logger.info(f"Stage 3: Updated listing {fb_id} with LLM analysis results (model: {llm_model}).")
         except Exception as e:
             logger.error(f"Error updating listing {fb_id} after Stage 3: {e}")
             self.conn.rollback()
@@ -215,11 +215,250 @@ class Database:
             logger.error(f"Error deleting listing {fb_id}: {e}")
             self.conn.rollback()
 
+    def save_telegram_message_id(self, fb_id: str, message_id: int):
+        """
+        Save telegram message_id after sending a listing.
+
+        Args:
+            fb_id: Facebook listing ID
+            message_id: Telegram message ID
+        """
+        query = "UPDATE listings SET telegram_message_id = %s WHERE fb_id = %s"
+        try:
+            self.cursor.execute(query, (message_id, fb_id))
+            self.conn.commit()
+            logger.info(f"Saved telegram_message_id {message_id} for listing {fb_id}")
+        except Exception as e:
+            logger.error(f"Error saving telegram_message_id for {fb_id}: {e}")
+            self.conn.rollback()
+
+    def log_batch_start(self, batch_date, batch_number: int) -> Optional[int]:
+        """
+        Log the start of a Stage5 batch run.
+
+        Args:
+            batch_date: Date of the batch (date object)
+            batch_number: Sequential batch number for this date
+
+        Returns:
+            batch_run_id if successful, None otherwise
+        """
+        query = """
+            INSERT INTO batch_runs (batch_date, batch_number, started_at, status)
+            VALUES (%s, %s, NOW(), 'running')
+            RETURNING id
+        """
+        try:
+            self.cursor.execute(query, (batch_date, batch_number))
+            self.conn.commit()
+            batch_run_id = self.cursor.fetchone()[0]
+            logger.info(f"Started batch run {batch_run_id} (date: {batch_date}, batch #{batch_number})")
+            return batch_run_id
+        except Exception as e:
+            logger.error(f"Error logging batch start: {e}")
+            self.conn.rollback()
+            return None
+
+    def log_batch_complete(
+        self,
+        batch_run_id: int,
+        listings_sent: int,
+        no_desc_sent: int,
+        blocked_count: int = 0,
+        error_count: int = 0
+    ):
+        """
+        Mark a batch run as completed.
+
+        Args:
+            batch_run_id: ID of the batch run
+            listings_sent: Number of regular listings sent
+            no_desc_sent: Number of no-description listings sent
+            blocked_count: Number of listings blocked by stage5 guard
+            error_count: Number of errors encountered
+        """
+        query = """
+            UPDATE batch_runs
+            SET finished_at = NOW(),
+                listings_sent = %s,
+                no_desc_sent = %s,
+                blocked_count = %s,
+                error_count = %s,
+                status = 'completed'
+            WHERE id = %s
+        """
+        try:
+            self.cursor.execute(query, (listings_sent, no_desc_sent, blocked_count, error_count, batch_run_id))
+            self.conn.commit()
+            logger.info(f"Completed batch run {batch_run_id}: {listings_sent} sent, {no_desc_sent} no-desc, {blocked_count} blocked, {error_count} errors")
+        except Exception as e:
+            logger.error(f"Error logging batch completion: {e}")
+            self.conn.rollback()
+
+    def get_batch_count_today(self) -> int:
+        """
+        Get the number of completed batches today.
+        Falls back to counting sent listings if batch_runs is empty.
+
+        Returns:
+            Number of completed batches for today (or listing count / 10)
+        """
+        query = """
+            SELECT COUNT(*)
+            FROM batch_runs
+            WHERE batch_date = CURRENT_DATE
+              AND status = 'completed'
+        """
+        try:
+            self.cursor.execute(query)
+            count = self.cursor.fetchone()[0]
+
+            # If no batch_runs data, estimate from sent listings (10 per batch)
+            if count == 0:
+                query_fallback = """
+                    SELECT COUNT(*)
+                    FROM listings
+                    WHERE status = 'stage5_sent'
+                      AND updated_at::date = CURRENT_DATE
+                """
+                self.cursor.execute(query_fallback)
+                sent_count = self.cursor.fetchone()[0]
+                return (sent_count + 9) // 10  # Round up to nearest batch
+
+            return count or 0
+        except Exception as e:
+            logger.error(f"Error getting batch count: {e}")
+            return 0
+
+    def get_sent_listings_count_today(self) -> int:
+        """
+        Get total number of listings sent today.
+
+        Returns:
+            Number of listings sent today
+        """
+        query = """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE status = 'stage5_sent'
+              AND updated_at::date = CURRENT_DATE
+        """
+        try:
+            self.cursor.execute(query)
+            count = self.cursor.fetchone()[0]
+            return count or 0
+        except Exception as e:
+            logger.error(f"Error getting sent listings count: {e}")
+            return 0
+
+    def save_reaction(self, telegram_message_id: int, fb_id: str, reaction_type: str):
+        """
+        Save or increment a reaction count.
+
+        Args:
+            telegram_message_id: Telegram message ID
+            fb_id: Facebook listing ID
+            reaction_type: Emoji reaction ('❤️', '💩', '🤡')
+        """
+        query = """
+            INSERT INTO feedback (telegram_message_id, fb_id, reaction_type, reaction_count, first_seen_at, last_updated_at)
+            VALUES (%s, %s, %s, 1, NOW(), NOW())
+            ON CONFLICT (telegram_message_id, reaction_type)
+            DO UPDATE SET
+                reaction_count = feedback.reaction_count + 1,
+                last_updated_at = NOW()
+        """
+        try:
+            self.cursor.execute(query, (telegram_message_id, fb_id, reaction_type))
+            self.conn.commit()
+            logger.info(f"Saved reaction {reaction_type} for message {telegram_message_id} (fb_id: {fb_id})")
+        except Exception as e:
+            logger.error(f"Error saving reaction: {e}")
+            self.conn.rollback()
+
+    def get_feedback_stats(self, since=None) -> Dict[str, Any]:
+        """
+        Get aggregated feedback statistics for listings sent today.
+
+        Args:
+            since: Optional date to filter by listing send date (default: today)
+
+        Returns:
+            Dictionary with feedback statistics
+        """
+        if since is None:
+            # Default to today - show feedback on listings sent today
+            # Use listings.updated_at (when sent to Telegram) instead of feedback.first_seen_at
+            date_clause = "l.updated_at::date = CURRENT_DATE AND l.status = 'stage5_sent'"
+        else:
+            date_clause = f"l.updated_at::date = '{since.date()}' AND l.status = 'stage5_sent'"
+
+        query = f"""
+            SELECT
+                f.reaction_type,
+                COUNT(DISTINCT f.telegram_message_id) as message_count,
+                SUM(f.reaction_count) as total_reactions,
+                json_agg(
+                    json_build_object(
+                        'fb_id', l.fb_id,
+                        'listing_url', l.listing_url,
+                        'title', l.title,
+                        'reaction_count', f.reaction_count
+                    ) ORDER BY f.reaction_count DESC
+                ) as listings
+            FROM listings l
+            LEFT JOIN feedback f ON l.fb_id = f.fb_id
+            WHERE {date_clause} AND f.reaction_type IS NOT NULL
+            GROUP BY f.reaction_type
+        """
+
+        try:
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+
+            stats = {
+                '❤️': {'message_count': 0, 'total_reactions': 0, 'listings': []},
+                '💩': {'message_count': 0, 'total_reactions': 0, 'listings': []},
+                '🤡': {'message_count': 0, 'total_reactions': 0, 'listings': []}
+            }
+
+            for row in rows:
+                reaction_type, message_count, total_reactions, listings = row
+                stats[reaction_type] = {
+                    'message_count': message_count,
+                    'total_reactions': total_reactions,
+                    'listings': listings or []
+                }
+
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting feedback stats: {e}")
+            return {}
+
+    def get_fb_id_by_message_id(self, telegram_message_id: int) -> Optional[str]:
+        """
+        Get fb_id by telegram_message_id.
+
+        Args:
+            telegram_message_id: Telegram message ID
+
+        Returns:
+            fb_id if found, None otherwise
+        """
+        query = "SELECT fb_id FROM listings WHERE telegram_message_id = %s LIMIT 1"
+        try:
+            self.cursor.execute(query, (telegram_message_id,))
+            result = self.cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Error getting fb_id by message_id {telegram_message_id}: {e}")
+            return None
+
     def __enter__(self):
         """Context manager entry."""
         self.connect()
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()

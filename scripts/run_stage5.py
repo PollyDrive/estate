@@ -295,9 +295,9 @@ def check_and_send_no_description(db: Database, notifier: TelegramNotifier) -> i
         
         try:
             message = format_no_description_batch(batch)
-            success = notifier.send_message(message)
-            
-            if success:
+            message_id = notifier.send_message(message)
+
+            if message_id:
                 # Mark all listings in this batch as sent
                 fb_ids = [listing['fb_id'] for listing in batch]
                 placeholders = ', '.join(['%s'] * len(fb_ids))
@@ -306,10 +306,13 @@ def check_and_send_no_description(db: Database, notifier: TelegramNotifier) -> i
                     fb_ids
                 )
                 db.conn.commit()
-                
+
+                # Note: For no_description batches, we don't save message_id per listing
+                # since multiple listings share one message
+
                 sent_count += len(batch)
-                logger.info(f"✓ Batch {batch_num}/{total_batches} sent successfully ({len(batch)} listings)")
-                
+                logger.info(f"✓ Batch {batch_num}/{total_batches} sent successfully (msg_id: {message_id}, {len(batch)} listings)")
+
                 # Delay between batches (except last one)
                 if i + batch_size < total_count:
                     logger.debug("  ⏱️  Waiting 2s before next batch...")
@@ -326,54 +329,66 @@ def check_and_send_no_description(db: Database, notifier: TelegramNotifier) -> i
 
 def main():
     """Run Stage 5: Send listings to Telegram with batching"""
-    
+
     logger.info("=" * 80)
     logger.info("STAGE 5: Telegram Notifications (Batched)")
     logger.info("=" * 80)
-    
+
     # Load environment
     load_dotenv()
-    
+
     # Load config
     config_path = 'config/config.json'
     if not os.path.exists(config_path):
         config_path = '/app/config/config.json'
-    
+
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
-    
+
     telegram_config = config.get('telegram', {})
     batch_size = telegram_config.get('batch_size', 10)
     delay_between_messages = telegram_config.get('delay_between_messages', 2)
-    
+
     # Check quiet hours
     if is_quiet_hours(telegram_config):
         logger.info("=" * 80)
         logger.info("Exiting due to quiet hours (00:00-07:00 GMT+8)")
         logger.info("=" * 80)
         sys.exit(0)
-    
+
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
     telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
     telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
-    
+
     if not all([db_url, telegram_token, telegram_chat_id]):
         logger.error("Missing required environment variables!")
         sys.exit(1)
-    
+
     # Initialize Telegram notifier
     notifier = TelegramNotifier(telegram_token, telegram_chat_id, config)
     logger.info("✓ Telegram notifier initialized")
     logger.info(f"📦 Batch size: {batch_size}")
     logger.info(f"⏱️  Delay between messages: {delay_between_messages}s")
-    
+
     sent_count = 0
     error_count = 0
     blocked_count = 0
-    
+
     db = Database()
     db.connect()
+
+    # Log batch start
+    from datetime import date
+    batch_date = date.today()
+    batch_number = db.get_batch_count_today() + 1
+    batch_run_id = db.log_batch_start(batch_date, batch_number)
+
+    if not batch_run_id:
+        logger.error("Failed to log batch start. Continuing anyway...")
+        batch_run_id = None
+
+    logger.info(f"📊 Starting batch run #{batch_number} for {batch_date}")
     
     try:
         # Get total count of unsent listings
@@ -436,22 +451,25 @@ def main():
                         continue
 
                     message = format_regular_message(listing)
-                    
-                    # Send to Telegram
-                    success = notifier.send_message(message)
-                    
-                    if success:
+
+                    # Send to Telegram and get message_id
+                    message_id = notifier.send_message(message)
+
+                    if message_id:
                         # Update status to stage5_sent and mark as sent
                         db.cursor.execute(
                             "UPDATE listings SET status = 'stage5_sent', telegram_sent = TRUE, telegram_sent_at = NOW() WHERE fb_id = %s",
                             (fb_id,)
                         )
                         db.conn.commit()
-                        
+
+                        # Save telegram message_id
+                        db.save_telegram_message_id(fb_id, message_id)
+
                         created_at = listing.get('created_at', 'unknown')
-                        logger.info(f"✓ [{i}/{len(listings)}] SENT: {fb_id} (created: {created_at})")
+                        logger.info(f"✓ [{i}/{len(listings)}] SENT: {fb_id} (msg_id: {message_id}, created: {created_at})")
                         sent_count += 1
-                        
+
                         # Delay between messages (except for last one)
                         if i < len(listings):
                             logger.debug(f"  ⏱️  Waiting {delay_between_messages}s before next message...")
@@ -493,17 +511,21 @@ def main():
         logger.info(f"Total sent: {sent_count + no_desc_sent}")
         logger.info("=" * 80)
 
+        # Log batch completion
+        if batch_run_id:
+            db.log_batch_complete(batch_run_id, sent_count, no_desc_sent, blocked_count, error_count)
+
         # Send cumulative pipeline stats after each batch run.
         try:
             stats_message = build_pipeline_stats_message(db)
-            stats_ok = notifier.send_message(stats_message)
-            if stats_ok:
-                logger.info("✓ Pipeline stats message sent")
+            stats_msg_id = notifier.send_message(stats_message)
+            if stats_msg_id:
+                logger.info(f"✓ Pipeline stats message sent (msg_id: {stats_msg_id})")
             else:
                 logger.warning("✗ Failed to send pipeline stats message")
         except Exception as e:
             logger.warning(f"✗ Could not build/send pipeline stats message: {e}")
-        
+
     finally:
         db.close()
 

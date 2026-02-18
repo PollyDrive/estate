@@ -187,11 +187,11 @@ def run_stage3_llm_analysis(config: dict, db: Database):
             db.update_listing_after_stage3(fb_id, False, "Missing description")
             continue
 
-        logger.info(f"[STAGE 3] Analyzing {fb_id} with Groq...")
-        passed, reason = level1_filter.filter(description)
-        
-        logger.info(f"[STAGE 3] Analysis for {fb_id}: Passed: {passed}. Reason: {reason}")
-        db.update_listing_after_stage3(fb_id, passed, reason)
+        logger.info(f"[STAGE 3] Analyzing {fb_id} with LLM...")
+        passed, reason, model_used = level1_filter.filter(description)
+
+        logger.info(f"[STAGE 3] Analysis for {fb_id}: Passed: {passed}. Reason: {reason}. Model: {model_used}")
+        db.update_listing_after_stage3(fb_id, passed, reason, model_used)
 
 
 def run_telegram_notifications(config: dict, db: Database, telegram: TelegramNotifier):

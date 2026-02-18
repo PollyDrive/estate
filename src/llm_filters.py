@@ -147,21 +147,39 @@ class OpenRouterFilter:
         self.root_config = config
         self.client = OpenRouterClient(config, api_key)
     
-    def filter(self, description: str) -> Tuple[bool, str]:
+    def filter(self, description: str) -> Tuple[bool, str, str]:
         """
         Check if listing passes strict rental criteria using OpenRouter.
-        
+
         Args:
             description: Listing description
-            
+
         Returns:
-            Tuple of (passed: bool, reason: str)
+            Tuple of (passed: bool, reason: str, model_used: str)
         """
+        # Extract config values
+        criterias = self.root_config.get("criterias", {})
+        filters = self.root_config.get("filters", {})
+
+        bedrooms_min = criterias.get("bedrooms_min", 4)
+        price_max = criterias.get("price_max", 40000000)
+        price_max_jt = price_max / 1000000  # Convert to millions for prompt
+
+        stop_locations = filters.get("stop_locations", [])
+        stop_locations_str = "', '".join(stop_locations) if stop_locations else ""
+
         # Build prompt from template
         prompt = f"""You are a very strict real estate filter. Your task is to categorize a listing.
 Respond with ONE category code ONLY.
 
 RULES (check in order):
+0.  **LOCATION** (CRITICAL - check FIRST before anything else):
+    -   ONLY ACCEPT listings in BALI, INDONESIA
+    -   REJECT any location outside Indonesia or Bali
+    -   REJECT these locations: '{stop_locations_str}'
+    -   REJECT American-style terms: 'Ranch', 'Townhouse', 'basement', 'hardwood floors' (these indicate USA properties)
+    -   If non-Indonesian/non-Bali or wrong location found -> 'REJECT_LOCATION'
+
 1.  **TYPE**:
     -   REJECT these sale/commercial types: 'dijual', 'for sale', 'sold', 'land', 'tanah', 'office', 'kos', 'kost', 'warung', 'tempat jualan', 'toko'.
     -   REJECT under construction: 'under construction', 'masih dibangun', 'sedang dibangun', 'finishing stage', 'belum selesai', 'not ready', 'will be ready'.
@@ -179,13 +197,13 @@ RULES (check in order):
     -   If found room only -> 'REJECT_ROOM_ONLY'
 
 2.  **BEDROOMS** (CRITICAL - read VERY carefully):
-    -   ACCEPT ONLY if description mentions 4 or more bedrooms
-    -   Valid forms: '4 bed', '4BR', '4kt', '5 bed', '5BR', '5kt', etc.
-    -   REJECT if 1, 2, or 3 bedrooms: '1 bed', '2BR', '3kt', '3 kamar', '3 room', 'one/two/three bedroom' -> 'REJECT_BEDROOMS'
+    -   ACCEPT ONLY if description mentions {bedrooms_min} or more bedrooms
+    -   Valid forms for {bedrooms_min}+ bedrooms: '{bedrooms_min} bed', '{bedrooms_min}BR', '{bedrooms_min}kt', '{bedrooms_min+1} bed', '{bedrooms_min+1}BR', '{bedrooms_min+1}kt', etc.
+    -   REJECT if fewer than {bedrooms_min} bedrooms: '1 bed', '2BR', '{bedrooms_min-1}kt', '{bedrooms_min-1} kamar', 'one/two/three bedroom' -> 'REJECT_BEDROOMS'
     -   REJECT if studio -> 'REJECT_BEDROOMS'
     -   REJECT if NO bedroom count mentioned in description -> 'REJECT_BEDROOMS'
-    -   IMPORTANT: '2KT' and '3KT' must be REJECT_BEDROOMS
-    -   IMPORTANT: '4KT' = 4 bedrooms = ACCEPT
+    -   IMPORTANT: Listings with less than {bedrooms_min} bedrooms must be REJECT_BEDROOMS
+    -   IMPORTANT: '{bedrooms_min}KT' = {bedrooms_min} bedrooms = ACCEPT
     -   IMPORTANT: If description only lists facilities without bedroom count -> 'REJECT_BEDROOMS'
 
 3.  **TERM** (CRITICAL - read carefully):
@@ -209,44 +227,51 @@ RULES (check in order):
 5.  **PRICE** (IMPORTANT - check carefully):
     -   Look for monthly price: numbers followed by 'jt', 'juta', 'million', 'm', 'mln', 'mil', 'IDR', 'Rp'
     -   If price is stated as YEARLY (e.g., '180 mln/year'), calculate monthly: yearly_price / 12
-    -   If monthly price > 16,000,000 IDR -> 'REJECT_PRICE'
-    -   Examples of TOO EXPENSIVE (>16jt/month): 17jt, 18m, 20 million, 25jt, 30m, 50 million, 100jt, 180 mln/year, 210 mill yearly
-    -   Examples of OK (<= 16jt/month): 10jt, 12m, 14 million, 15jt, 16jt
+    -   If monthly price > {price_max_jt}jt IDR -> 'REJECT_PRICE'
+    -   CRITICAL: If yearly price > {price_max_jt * 12}jt/year -> REJECT_PRICE (>{price_max_jt}jt/month)
+    -   Examples of TOO EXPENSIVE (>{price_max_jt}jt/month): {price_max_jt + 1}jt, {price_max_jt + 10}m, {price_max_jt + 20} million, {price_max_jt * 12 + 50} mln/year
+    -   Examples of OK (<= {price_max_jt}jt/month): 10jt, 12m, 15 million, {price_max_jt}jt, {price_max_jt * 12} mil/year (={price_max_jt} mil/month)
 
 If you find a rejection, return the FIRST rejection code you find.
 If ALL rules are 'PASS', return 'PASS'.
 
 EXAMPLES:
+- Description: '{bedrooms_min}BR house in New York, $2000/month' -> REJECT_LOCATION (USA location)
+- Description: '{bedrooms_min}-Bedroom House for Rent – Staten Island' -> REJECT_LOCATION (USA - Staten Island)
+- Description: 'Beautiful Remodeled Ranch offering {bedrooms_min} Bedrooms with basement and hardwood floors' -> REJECT_LOCATION (USA - Ranch with basement)
+- Description: 'Villa in Miami Beach, {bedrooms_min-1}BR, furnished' -> REJECT_LOCATION (Florida, USA)
+- Description: 'Apartment in Bangkok, {bedrooms_min}BR, 15000 THB' -> REJECT_LOCATION (Thailand)
+- Description: 'House in Kuala Lumpur, Malaysia' -> REJECT_LOCATION (Malaysia)
 - Description: 'Villa 1BR in Ubud, 10jt/month' -> REJECT_BEDROOMS (1 bedroom)
 - Description: 'Studio apartment with kitchen' -> REJECT_BEDROOMS (studio)
 - Description: '2 KT 1 Kamar Mandi - Rumah, 12jt/month' -> REJECT_BEDROOMS
-- Description: '3 KT 2 KM - Rumah, 15jt/month' -> REJECT_BEDROOMS
-- Description: '4BR villa Cemagi, 12jt/month' -> PASS (4 bedrooms, OK!)
-- Description: '5BR villa, 14jt/month' -> PASS (5 bedrooms, acceptable)
+- Description: '{bedrooms_min-1} KT 2 KM - Rumah, 15jt/month' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min}BR villa Cemagi, 12jt/month' -> PASS ({bedrooms_min} bedrooms, OK!)
+- Description: '{bedrooms_min+1}BR villa, 14jt/month' -> PASS ({bedrooms_min+1} bedrooms, acceptable)
 - Description: 'Land for rent, 5jt/month' -> REJECT_TYPE (land)
 - Description: 'Menerima kos perempuan' -> REJECT_TYPE (kos)
 - Description: 'Di sewa tempat jualan' -> REJECT_TYPE (tempat jualan)
-- Description: '4BR villa under construction, 80% finished, 12jt' -> REJECT_TYPE (under construction)
+- Description: '{bedrooms_min}BR villa under construction, 80% finished, 12jt' -> REJECT_TYPE (under construction)
 - Description: 'New house masih dibangun, available next month' -> REJECT_TYPE (sedang dibangun)
-- Description: '3BR villa, 95% done, on finishing stage, 15jt' -> REJECT_TYPE (finishing stage)
-- Description: '2BR house leasehold for sale, 500jt' -> REJECT_TYPE (leasehold sale)
-- Description: '3BR villa, leasehold 20 years, 10jt/month' -> REJECT_BEDROOMS
-- Description: '2BR, construction nearby, 12jt/month' -> PASS (nearby construction OK)
+- Description: '{bedrooms_min-1}BR villa, 95% done, on finishing stage, 15jt' -> REJECT_TYPE (finishing stage)
+- Description: '{bedrooms_min-2}BR house leasehold for sale, 500jt' -> REJECT_TYPE (leasehold sale)
+- Description: '{bedrooms_min-1}BR villa, leasehold 20 years, 10jt/month' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2}BR, construction nearby, 12jt/month' -> REJECT_BEDROOMS (nearby construction OK but <{bedrooms_min} bedrooms)
 - Description: 'Room for rent in shared house, 3jt/month' -> REJECT_ROOM_ONLY (single room)
 - Description: 'Private room available in villa, 4jt' -> REJECT_ROOM_ONLY (room only)
 - Description: 'Sewa kamar di rumah, AC, 5jt/bulan' -> REJECT_ROOM_ONLY (kamar saja)
 - Description: 'Facilities: AC, TV, kitchen' -> REJECT_BEDROOMS (no bedroom count)
 - Description: '1 building 1 room with AC' -> REJECT_BEDROOMS (1 room)
-- Description: 'Villa 2BR, 150jt/year' -> REJECT_BEDROOMS
-- Description: '2BR Villa, 180 mln/year' -> REJECT_BEDROOMS
-- Description: '3 kamar tidur, hrg 12jt/th nett' -> REJECT_BEDROOMS
-- Description: '2BR house, 100mln/6 months upfront' -> REJECT_BEDROOMS
-- Description: '3BR Villa, unfurnished, 14jt/month' -> REJECT_BEDROOMS
-- Description: '2BR, minimal 1 tahun, 15jt/month' -> REJECT_BEDROOMS
-- Description: '2 bedroom house, daily rent, 500k/day' -> REJECT_TERM (daily rental)
+- Description: 'Villa {bedrooms_min-2}BR, 150jt/year' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2}BR Villa, 180 mln/year' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-1} kamar tidur, hrg 12jt/th nett' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2}BR house, 100mln/6 months upfront' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-1}BR Villa, unfurnished, 14jt/month' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2}BR, minimal 1 tahun, 15jt/month' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2} bedroom house, daily rent, 500k/day' -> REJECT_TERM (daily rental)
 - Description: 'Villa nightly rental, 2jt/night' -> REJECT_TERM (nightly rental)
-- Description: '2 bedroom house, monthly rent, 15jt' -> REJECT_BEDROOMS
-- Description: '2BR Villa, beautiful, 500jt' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2} bedroom house, monthly rent, 15jt' -> REJECT_BEDROOMS
+- Description: '{bedrooms_min-2}BR Villa, beautiful, 500jt' -> REJECT_BEDROOMS
 - Description: 'Two bedroom villa with pool, 14jt/month' -> REJECT_BEDROOMS
 
 Description:
@@ -269,10 +294,10 @@ CATEGORY:"""
 
         if code == "PASS":
             logger.info("OpenRouter filter: PASS")
-            return True, "Passed all rules"
+            return True, "Passed all rules", self.client.model
         if code.startswith("REJECT_"):
             logger.info(f"OpenRouter filter: {code}")
-            return False, code
+            return False, code, self.client.model
 
         raise LLMProcessingError(f"Unexpected OpenRouter response: {answer}")
 

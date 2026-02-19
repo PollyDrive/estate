@@ -36,7 +36,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Valid reaction emojis for feedback
-VALID_REACTIONS = {'❤️', '💩', '🤡'}
+# Note: Telegram sends ❤ without variation selector (U+2764), not ❤️ (U+2764 U+FE0F)
+VALID_REACTIONS = {'❤', '💩', '🤡'}
 
 
 async def handle_reaction(event: MessageReactionUpdated, bot: Bot, db: Database):
@@ -63,6 +64,7 @@ async def handle_reaction(event: MessageReactionUpdated, bot: Bot, db: Database)
         # Check if it's an emoji reaction (not custom emoji)
         if isinstance(reaction, ReactionTypeEmoji):
             emoji = reaction.emoji
+            logger.info(f"📨 Received emoji reaction: '{emoji}' (repr: {repr(emoji)}) for message {message_id}")
 
             # Only track our valid feedback emojis
             if emoji in VALID_REACTIONS:
@@ -193,7 +195,8 @@ async def main():
         await message.reply(
             "🤖 *RealtyBot-Bali активен!*\n\n"
             "📊 Команды:\n"
-            "/stats - показать статистику за сегодня\n\n"
+            "/stats - показать статистику за сегодня\n"
+            "/favorites - показать все избранные объявления (❤)\n\n"
             "📝 Отслеживаемые реакции:\n"
             "❤️ - Хороший вариант\n"
             "💩 - Плохой вариант\n"
@@ -274,6 +277,48 @@ async def main():
             logger.error(f"Error getting stats: {e}", exc_info=True)
             await message.reply("❌ Ошибка при получении статистики")
 
+    # /favorites command - show all listings with ❤ reactions
+    @dp.message(Command("favorites"))
+    async def cmd_favorites(message: types.Message):
+        """Handle /favorites command - show all favorite listings."""
+        try:
+            favorites = db.get_favorite_listings(limit=50)
+
+            if not favorites:
+                await message.reply(
+                    "❤️ *Избранные объявления*\n\n"
+                    "Пока нет объявлений с ❤ реакцией.\n"
+                    "Поставьте ❤ на понравившиеся объявления!",
+                    parse_mode='Markdown'
+                )
+                return
+
+            # Build message with all favorites
+            msg = f"❤️ *Избранные объявления* ({len(favorites)})\n\n"
+
+            for i, fav in enumerate(favorites, 1):
+                title = fav['title'][:50] + "..." if len(fav['title']) > 50 else fav['title']
+                location = fav['location'] or 'N/A'
+                price = fav['price'] or 'N/A'
+                url = fav['url']
+
+                msg += f"{i}. *{title}*\n"
+                msg += f"   📍 {location} | 💰 {price}\n"
+                msg += f"   🔗 {url}\n\n"
+
+                # Telegram message limit is 4096 chars
+                if len(msg) > 3500:
+                    await message.reply(msg, parse_mode='Markdown', disable_web_page_preview=True)
+                    msg = f"❤️ *Избранные объявления (продолжение)*\n\n"
+
+            # Send remaining message
+            if msg.strip() != f"❤️ *Избранные объявления (продолжение)*\n\n":
+                await message.reply(msg, parse_mode='Markdown', disable_web_page_preview=True)
+
+        except Exception as e:
+            logger.error(f"Error showing favorites: {e}", exc_info=True)
+            await message.reply("❌ Ошибка при получении избранных объявлений")
+
     # /help command
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message):
@@ -282,6 +327,7 @@ async def main():
             "📖 *Доступные команды:*\n\n"
             "/start - информация о боте\n"
             "/stats - статистика за сегодня\n"
+            "/favorites - показать все избранные объявления (❤)\n"
             "/help - эта справка\n\n"
             "🔔 *Система фидбека:*\n"
             "Ставьте реакции на объявления:\n"
@@ -295,8 +341,8 @@ async def main():
     logger.info("🚀 Starting polling...")
 
     try:
-        # Start polling
-        await dp.start_polling(bot)
+        # Start polling with explicit allowed_updates to receive message_reaction events
+        await dp.start_polling(bot, allowed_updates=["message", "message_reaction"])
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:

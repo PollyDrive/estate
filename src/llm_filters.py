@@ -173,12 +173,16 @@ class OpenRouterFilter:
 Respond with ONE category code ONLY.
 
 RULES (check in order):
-0.  **LOCATION** (CRITICAL - check FIRST before anything else):
+0.  **LOCATION & LANGUAGE** (CRITICAL - check FIRST before anything else):
     -   ONLY ACCEPT listings in BALI, INDONESIA
     -   REJECT any location outside Indonesia or Bali
     -   REJECT these locations: '{stop_locations_str}'
     -   REJECT American-style terms: 'Ranch', 'Townhouse', 'basement', 'hardwood floors' (these indicate USA properties)
-    -   If non-Indonesian/non-Bali or wrong location found -> 'REJECT_LOCATION'
+    -   IMPORTANT: If location is EMPTY or missing, carefully check language:
+        * ACCEPT: English, Indonesian (Bahasa Indonesia), Russian
+        * REJECT: Spanish (habitaciones, baño, departamento, casa, recamaras), Portuguese, French, German, Chinese, etc.
+        * If empty location + non-English/Indonesian/Russian language -> 'REJECT_LOCATION' (likely foreign country)
+    -   If non-Indonesian/non-Bali or wrong location or wrong language found -> 'REJECT_LOCATION'
 
 1.  **TYPE**:
     -   REJECT these sale/commercial types: 'dijual', 'for sale', 'sold', 'land', 'tanah', 'office', 'kos', 'kost', 'warung', 'tempat jualan', 'toko'.

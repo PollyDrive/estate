@@ -3,8 +3,9 @@ from typing import Any, Dict, Optional
 
 
 DEFAULT_APIFY_PROXY_CONFIG: Dict[str, Any] = {
-    "useApifyProxy": False,
+    "useApifyProxy": True,
     "apifyProxyGroups": ["RESIDENTIAL"],
+    "proxyCountry": "ID"
 }
 
 

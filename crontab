@@ -8,11 +8,11 @@
 #
 # DO NOT UNCOMMENT THE LINES BELOW unless you have upgraded Apify plan
 
-# Stage 1 groups scraper: every 2 hours (minute 0)
-0 */2 * * * cd /app && /usr/local/bin/python3 /app/scripts/run_group_scrape_manual.py >> /var/log/pipeline_groups_cron.log 2>&1
+# Stage 1 groups scraper: every 3 hours (minute 0)
+# 0 */3 * * * cd /app && /usr/local/bin/python3 /app/scripts/run_group_scrape_manual.py && /usr/local/bin/python3 /app/scripts/run_stage2_manual.py>> /var/log/pipeline_groups_cron.log 2>&1
 
 # Stages 2-5: every hour (minute 10), separated from groups run
-10 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage2_manual.py && /usr/local/bin/python3 /app/scripts/run_stage2_manual_qfr.py && /usr/local/bin/python3 /app/scripts/run_stage3_llm.py && /usr/local/bin/python3 /app/scripts/run_stage4.py && /usr/local/bin/python3 /app/scripts/run_stage5.py >> /var/log/pipeline_cron.log 2>&1
+10 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage2_manual_qfr.py && /usr/local/bin/python3 /app/scripts/run_stage3_llm.py && /usr/local/bin/python3 /app/scripts/run_stage4.py && /usr/local/bin/python3 /app/scripts/run_stage5.py >> /var/log/pipeline_cron.log 2>&1
 
 # Empty line required at end of crontab file
 

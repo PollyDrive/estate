@@ -21,7 +21,8 @@
     "min_concurrency": 1,
     "max_request_retries": 2,
     "proxy": {
-      "useApifyProxy": false,
+      "useApifyProxy": true,
+      "proxyCountry": "ID",
       "apifyProxyGroups": ["RESIDENTIAL"]
     }
   },
@@ -29,14 +30,15 @@
     "enabled": true,
     "actor_id": "qFR6mjgdwPouKLDvE",
     "start_urls": [
-      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?minBedrooms=4&maxPrice=40000000&daysSinceListed=2"
+      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?minBedrooms=4&maxPrice=40000000&daysSinceListed=4"
     ],
     "max_stage2_items": 50,
     "fetchDetails": true,
     "getNewItems": true,
     "proxyCountry": "ID",
     "proxy": {
-      "useApifyProxy": false,
+      "useApifyProxy": true,
+      "proxyCountry": "ID",
       "apifyProxyGroups": [
         "RESIDENTIAL"
       ]

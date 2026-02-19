@@ -39,6 +39,38 @@ def _extract_reject_type(reason: str) -> str:
     return m.group(1) if m else "REJECT_UNKNOWN"
 
 
+def _token_match(text: str, token: str) -> bool:
+    """Case-insensitive whole-token match (prevents NY -> Nyuh)."""
+    if not text or not token:
+        return False
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])"
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def _matches_stop_location(location: str, llm_text: str, stop_loc: str) -> bool:
+    """
+    Safer stop-location matching:
+    - Short codes (NY/NJ/CA/...) are matched ONLY against `location` as whole tokens.
+    - Longer values are matched as whole tokens in location first, then LLM text.
+    """
+    stop_raw = (stop_loc or "").strip()
+    if not stop_raw:
+        return False
+
+    clean = re.sub(r"^in\s+", "", stop_raw, flags=re.IGNORECASE).strip()
+    if not clean:
+        return False
+
+    location = location or ""
+    llm_text = llm_text or ""
+
+    is_short_code = bool(re.fullmatch(r"[A-Za-z]{2,3}", clean))
+    if is_short_code:
+        return _token_match(location, clean)
+
+    return _token_match(location, clean) or _token_match(llm_text, clean)
+
+
 def main():
     """Run Stage 3: LLM analysis for unprocessed listings"""
 
@@ -143,6 +175,8 @@ def main():
 
                 # Check location against stop_locations FIRST
                 stop_locations = config.get('filters', {}).get('stop_locations', [])
+                allowed_locations = criterias.get('allowed_locations', [])
+                allowed_locations_lower = [a.lower() for a in allowed_locations]
                 location_lower = location.lower() if location else ''
                 llm_text_lower = llm_text.lower() if llm_text else ''
 
@@ -159,11 +193,7 @@ def main():
                 for stop_loc in stop_locations:
                     if not passed:
                         break
-                    # Remove "in " prefix for checking (e.g., "in Ubud" -> "ubud")
-                    stop_loc_clean = stop_loc.lower().replace('in ', '').strip()
-
-                    # Check both location field and currently used LLM text.
-                    if stop_loc_clean in location_lower or stop_loc_clean in llm_text_lower:
+                    if _matches_stop_location(location, llm_text, stop_loc):
                         if enforce_stop_locations:
                             passed = False
                             reason = f"REJECT_LOCATION (stop location: {stop_loc})"
@@ -174,6 +204,44 @@ def main():
                             )
                         break
 
+                # If location is empty or not in allowed_locations, ask LLM to determine country.
+                # This catches USA/other-country listings that slip through with blank location.
+                if passed and allowed_locations:
+                    location_known = location_lower and any(
+                        loc in location_lower for loc in allowed_locations_lower
+                    )
+                    if not location_known:
+                        # Ask LLM: is this a Bali/Indonesia listing?
+                        loc_prompt = (
+                            f"You are a geo-classifier. Based ONLY on the text below, "
+                            f"determine what country/region this real estate listing is from.\n\n"
+                            f"Location field: \"{location}\"\n"
+                            f"Title: \"{listing.get('title', '')}\"\n"
+                            f"Description: \"{llm_text[:600]}\"\n\n"
+                            f"Answer with ONE of:\n"
+                            f"- BALI if listing is clearly in Bali or Indonesia\n"
+                            f"- NOT_BALI if listing is from another country/region (USA, Europe, Asia, etc.)\n"
+                            f"- UNKNOWN if impossible to determine\n\n"
+                            f"COUNTRY:"
+                        )
+                        try:
+                            geo_answer = llm_filter.client.generate_text(loc_prompt).strip().upper()
+                            import re as _re
+                            geo_code = "UNKNOWN"
+                            if _re.search(r"\bBALI\b", geo_answer):
+                                geo_code = "BALI"
+                            elif _re.search(r"\bNOT_BALI\b", geo_answer):
+                                geo_code = "NOT_BALI"
+                            logger.info(f"  GEO CHECK: location='{location}' → LLM says: {geo_code} (raw: {geo_answer[:80]})")
+                            if geo_code == "NOT_BALI":
+                                passed = False
+                                reason = f"REJECT_LOCATION (LLM geo-check: not Bali, location='{location}')"
+                                logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
+                            elif geo_code == "UNKNOWN":
+                                logger.info(f"  ⚠ GEO UNKNOWN — passing to main LLM filter")
+                        except Exception as geo_err:
+                            logger.warning(f"  ⚠ GEO CHECK failed: {geo_err} — skipping geo filter")
+
                 # If location check passed, run OpenRouter analysis
                 if passed:
                     try:
@@ -181,6 +249,7 @@ def main():
                         reject_type = _extract_reject_type(reason)
 
                         # Deterministic overrides for known false negatives.
+                        # IMPORTANT: never override REJECT_LOCATION — geo check is authoritative.
                         if not passed and reject_type == "REJECT_BEDROOMS":
                             bedrooms = listing.get('bedrooms')
                             if bedrooms is not None and bedrooms >= 4:

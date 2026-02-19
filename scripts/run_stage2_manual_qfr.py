@@ -77,7 +77,7 @@ def main():
         start_urls = list(qfr_cfg.get("start_urls") or [])
         stage2_listings = []
         if start_urls:
-            max_stage2 = int(qfr_cfg.get("max_stage2_items", 50))
+            max_stage2 = int(qfr_cfg.get("max_stage2_items", 20))
             logger.info(
                 "Scraping marketplace via QFR actor (maxListings=%s, startUrls=%s)...",
                 max_stage2,
@@ -124,6 +124,7 @@ def main():
 
                 # Skip if location matches stop_locations (e.g., USA, other countries)
                 # Use word boundary matching to avoid false positives (e.g., "ny" in "Gianyar")
+                # Empty locations and foreign languages will be handled by LLM filter
                 location_rejected = False
                 if location and stop_locations_lower:
                     import re

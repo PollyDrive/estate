@@ -454,6 +454,55 @@ class Database:
             logger.error(f"Error getting fb_id by message_id {telegram_message_id}: {e}")
             return None
 
+    def get_favorite_listings(self, limit: int = 50) -> list:
+        """
+        Get all listings with ❤ reactions.
+
+        Args:
+            limit: Maximum number of listings to return
+
+        Returns:
+            List of dicts with listing info
+        """
+        query = """
+            SELECT
+                l.fb_id,
+                l.title,
+                l.listing_url,
+                l.price,
+                l.location,
+                f.reaction_count,
+                f.first_seen_at,
+                l.updated_at as sent_at
+            FROM feedback f
+            INNER JOIN listings l ON f.fb_id = l.fb_id
+            WHERE f.reaction_type = '❤'
+            ORDER BY f.first_seen_at DESC
+            LIMIT %s
+        """
+        try:
+            self.cursor.execute(query, (limit,))
+            rows = self.cursor.fetchall()
+
+            favorites = []
+            for row in rows:
+                fb_id, title, url, price, location, count, first_seen, sent_at = row
+                favorites.append({
+                    'fb_id': fb_id,
+                    'title': title,
+                    'url': url,
+                    'price': price,
+                    'location': location,
+                    'reaction_count': count,
+                    'first_seen_at': first_seen,
+                    'sent_at': sent_at
+                })
+
+            return favorites
+        except Exception as e:
+            logger.error(f"Error getting favorite listings: {e}")
+            return []
+
     def __enter__(self):
         """Context manager entry."""
         self.connect()

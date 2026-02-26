@@ -1,18 +1,21 @@
-# RealtyBot-Bali cron schedule
-# 
-# ⚠️  AUTOMATIC EXECUTION DISABLED ⚠️
-# 
-# Bot runs MANUALLY ONLY to stay within Apify free tier limits
-# Use: docker-compose exec bot python3 /app/src/main.py
-# Or:  ./run_test.sh
-#
-# DO NOT UNCOMMENT THE LINES BELOW unless you have upgraded Apify plan
+# RealtyBot-Bali cron schedule (chat -1003795625146 focus)
 
-# Stage 1 groups scraper: every 3 hours (minute 0)
-# 0 */3 * * * cd /app && /usr/local/bin/python3 /app/scripts/run_group_scrape_manual.py && /usr/local/bin/python3 /app/scripts/run_stage2_manual.py>> /var/log/pipeline_groups_cron.log 2>&1
+# Stage2 QFR for chat -1003795625146: every 10 minutes
+*/10 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage2_manual_qfr.py --chat -1003795625146 >> /var/log/pipeline_qfr_1003795625146.log 2>&1
 
-# Stages 2-5: every hour (minute 10), separated from groups run
-10 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage2_manual_qfr.py && /usr/local/bin/python3 /app/scripts/run_stage3_llm.py && /usr/local/bin/python3 /app/scripts/run_stage4.py && /usr/local/bin/python3 /app/scripts/run_stage5.py >> /var/log/pipeline_cron.log 2>&1
+# Stage3 (global): every hour, shortly after group->stage2 cycle
+30 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage3_llm.py >> /var/log/pipeline_stage34_1003795625146.log 2>&1
+
+# Stage4 for chat -1003795625146: every hour, 13 minutes after Stage3
+43 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage4.py --chat -1003795625146 >> /var/log/pipeline_stage34_1003795625146.log 2>&1
+
+# Group scrape (global): every 3 hours
+20 */3 * * * cd /app && /usr/local/bin/python3 /app/scripts/run_group_scrape_manual.py >> /var/log/pipeline_groups_stage2.log 2>&1
+
+# Stage2 manual (global): every 3 hours, 3 minutes after group scrape
+23 */3 * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage2_manual.py >> /var/log/pipeline_groups_stage2.log 2>&1
+
+# Stage5 for chat -1003795625146: every hour, after stage4
+53 * * * * cd /app && /usr/local/bin/python3 /app/scripts/run_stage5.py --chat -1003795625146 >> /var/log/pipeline_stage5_1003795625146.log 2>&1
 
 # Empty line required at end of crontab file
-

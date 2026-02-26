@@ -23,7 +23,9 @@
     "proxy": {
       "useApifyProxy": true,
       "proxyCountry": "ID",
-      "apifyProxyGroups": ["RESIDENTIAL"]
+      "apifyProxyGroups": [
+        "RESIDENTIAL"
+      ]
     }
   },
   "marketplace_qfr": {
@@ -77,76 +79,12 @@
       "505131353625199"
     ]
   },
-  "criterias": {
-    "bedrooms_min": 4,
-    "price_max": 40000000,
-    "default_price": {
-      "max": 40000000
-    },
-    "allowed_locations": [
-      "Abiansemal",
-      "Singakerta",
-      "Mengwi",
-      "Pererenan",
-      "Berawa", 
-      "Umalas",
-      "Seseh",
-      "Tumbak Bayuh",
-      "Buduk",
-      "Sibang Gede",
-      "Tibubeneng",
-      "Padonan", 
-      "Canggu", 
-      "Ubud",
-      "Kuta",
-      "Seminyak",
-      "Sanur",
-      "Legian",
-      "Denpasar",
-      "Tabanan",
-      "Kediri",
-      "Munggu",
-      "Tanah Lot",
-      "Tegallalang",
-      "Payangan",
-      "Petulu",
-      "Mas",
-      "Lodtunduh",
-      "Sukawati",
-      "Celuk"
-    ]
-  },
   "filters": {
     "stop_words": [
       "tanah",
       "renovation project",
       "client",
       "commercial",
-      "studio",
-      "1br",
-      "2br",
-      "3br",
-      "1 br",
-      "2 br",
-      "3 br",
-      "1 bedroom",
-      "2 bedroom",
-      "3 bedroom",
-      "1 bedrooms",
-      "2 bedrooms",
-      "3 bedrooms",
-      "1 bed",
-      "2 bed",
-      "3 bed",
-      "1 kt",
-      "2 kt",
-      "3 kt",
-      "1kt",
-      "2kt",
-      "3kt",
-      "1 kamar tidur",
-      "2 kamar tidur",
-      "3 kamar tidur",
       "daily",
       "harian",
       "weekly",
@@ -155,7 +93,6 @@
       "per day",
       "per night",
       "nightly",
-      "shared kitchen",
       "dapur bersama",
       "no kitchen",
       "outdoor kitchen",
@@ -180,7 +117,6 @@
       "I am looking",
       "looking for",
       "housemate",
-      "rented room",
       "bermasalah",
       "ahlinya",
       "service AC",
@@ -217,7 +153,23 @@
       "leasehold",
       "for sale",
       "dijual",
-      "forsale"
+      "forsale",
+      "sewa kamar",
+      "kamar untuk disewa",
+      "kamar saja",
+      "under construction",
+      "masih dibangun",
+      "sedang dibangun",
+      "finishing stage",
+      "belum selesai",
+      "hardwood floors",
+      "basement",
+      "sqft",
+      "sq ft",
+      "zip code",
+      "credit check",
+      "background check",
+      "security deposit required"
     ],
     "stop_words_detailed": [
       "minimum lease 2 years",
@@ -274,9 +226,6 @@
     ],
     "enforce_stop_locations": true,
     "required_words": [
-      "kitchen",
-      "kitchenette",
-      "dapur"
     ],
     "phone_regex": [
       "\\+?62\\s?8\\d{2}[\\s-]?\\d{3,4}[\\s-]?\\d{3,4}",
@@ -284,31 +233,40 @@
     ],
     "stage5_guard": {
       "enabled": true,
-      "max_price": 40000000,
-      "blocked_locations": [
-        "karangasem"
-      ],
       "duplicate_check": true,
       "duplicate_reason": "REJECT_STAGE5: duplicate phone/location/bedrooms",
       "regex_rules": [
         {
           "reason": "REJECT_STAGE5: minimum lease term 15 years",
-          "fields": ["title", "description", "location"],
+          "fields": [
+            "title",
+            "description",
+            "location"
+          ],
           "regex": "minimum\\s+lease\\s+term\\s+15\\s+years|minimum\\s+lease\\s+15\\s+years|\\b15\\s+years?\\b"
         },
         {
           "reason": "REJECT_STAGE5: room/kos type listing",
-          "fields": ["title", "description"],
+          "fields": [
+            "title",
+            "description"
+          ],
           "regex": "d\\s*trima\\s*kos|terima\\s*kos|kosan|kost|private\\s+room|room\\s+for\\s+rent"
         },
         {
           "reason": "REJECT_STAGE5: non-Bali US location",
-          "fields": ["title", "description", "location"],
+          "fields": [
+            "title",
+            "description",
+            "location"
+          ],
           "regex": "new york|brooklyn|queens|bronx|manhattan|jersey city|new jersey|\\busa\\b|united states"
         },
         {
           "reason": "REJECT_STAGE5: suspicious 100,000,000 price",
-          "fields": ["price"],
+          "fields": [
+            "price"
+          ],
           "regex": "100[\\s\\.,]*000[\\s\\.,]*000"
         }
       ]

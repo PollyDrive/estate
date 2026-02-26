@@ -1,0 +1,70 @@
+[
+  {
+    "chat_id": -1003795625146,
+    "name": "4BR+ Bali Villas",
+    "enabled": true,
+    "bedrooms_min": 4,
+    "bedrooms_max": 4,
+    "price_max": 45000000,
+    "allowed_locations": [
+      "Abiansemal", "Singakerta", "Mengwi", "Pererenan", "Berawa",
+      "Umalas", "Seseh", "Tumbak Bayuh", "Buduk", "Sibang Gede",
+      "Tibubeneng", "Padonan", "Canggu", "Ubud", "Kuta", "Seminyak", "Kerobokan",
+      "Sanur", "Legian", "Denpasar", "Tabanan", "Kediri", "Munggu",
+      "Tanah Lot", "Tegallalang", "Payangan", "Petulu", "Mas",
+      "Lodtunduh", "Sukawati", "Celuk", "Badung", "Gianyar"
+    ],
+    "stop_locations": [],
+    "stop_words": [
+      "1br", "2br", "3br",
+      "1 br", "2 br", "3 br",
+      "1 bedroom", "2 bedroom", "3 bedroom",
+      "1 bedrooms", "2 bedrooms", "3 bedrooms",
+      "1 bed", "2 bed", "3 bed",
+      "1 kt", "2 kt", "3 kt",
+      "1kt", "2kt", "3kt",
+      "1 kamar tidur", "2 kamar tidur", "3 kamar tidur"
+    ],
+    "qfr_start_urls": [
+      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?minBedrooms=4&maxPrice=45000000&daysSinceListed=4"
+    ]
+  },
+  {
+    "chat_id": -1003899048532,
+    "name": "Budget Bali Villas",
+    "enabled": true,
+    "bedrooms_min": 1,
+    "bedrooms_max": 1,
+    "price_max": 6000000,
+    "allowed_locations": [
+      "Abiansemal", "Singakerta", "Mengwi", "Pererenan", "Berawa",
+      "Umalas", "Seseh", "Tumbak Bayuh", "Buduk", "Sibang Gede",
+      "Tibubeneng", "Padonan", "Canggu", "Seminyak", "Kerobokan",
+      "Denpasar", "Tabanan", "Kediri", "Munggu",
+      "Badung"
+    ],
+    "stop_locations": [
+      "Ubud", "Kintamani", "Jimbaran", "Uluwatu",
+      "Nusa Dua", "Lovina", "Singaraja", "Ungasan", "Karangasem", "Amed",
+      "New York", "NY", "NJ", "USA", "United States", "California", "CA",
+      "Florida", "FL", "Texas", "TX", "Los Angeles", "Miami", "Chicago",
+      "Boston", "San Francisco", "Newark", "Passaic", "Elizabeth",
+      "Hillside", "Brooklyn", "Queens", "Manhattan", "Bronx", "Staten Island",
+      "Thailand", "Philippines", "Vietnam", "Malaysia", "Singapore",
+      "Australia", "Europe"
+    ],
+    "stop_words": [
+      "2br", "3br", "4br", "5br", "6br",
+      "2 br", "3 br", "4 br", "5 br", "6 br",
+      "2 bedroom", "3 bedroom", "4 bedroom", "5 bedroom", "6 bedroom",
+      "2 bedrooms", "3 bedrooms", "4 bedrooms", "5 bedrooms", "6 bedrooms",
+      "2 bed", "3 bed", "4 bed", "5 bed", "6 bed",
+      "2 kt", "3 kt", "4 kt", "5 kt", "6 kt",
+      "2kt", "3kt", "4kt", "5kt", "6kt",
+      "2 kamar tidur", "3 kamar tidur", "4 kamar tidur", "5 kamar tidur", "6 kamar tidur"
+    ],
+    "qfr_start_urls": [
+      "https://www.facebook.com/marketplace/107286902636860/propertyrentals?maxPrice=7000000&daysSinceListed=6"
+    ]
+  }
+]

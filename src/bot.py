@@ -22,6 +22,7 @@ from aiogram.types import MessageReactionUpdated, ReactionTypeEmoji
 sys.path.insert(0, str(Path(__file__).parent))
 
 from database import Database
+from pipeline_stats import build_pipeline_stats_message
 
 # Setup logging
 logging.basicConfig(
@@ -72,28 +73,31 @@ async def handle_reaction(event: MessageReactionUpdated, bot: Bot, db: Database)
                 fb_id = db.get_fb_id_by_message_id(message_id)
 
                 if fb_id:
-                    # Save reaction to database
-                    db.save_reaction(message_id, fb_id, emoji)
-                    logger.info(f"✓ Saved reaction {emoji} for message {message_id} (fb_id: {fb_id})")
+                    # Save reaction to database, tagged with the chat it came from
+                    db.save_reaction(message_id, fb_id, emoji, chat_id=chat_id)
+                    logger.info(f"✓ Saved reaction {emoji} for message {message_id} (fb_id: {fb_id}, chat_id: {chat_id})")
                 else:
                     logger.warning(f"⚠️  Message {message_id} not found in database. Skipping reaction {emoji}.")
             else:
                 logger.debug(f"Ignoring non-feedback emoji: {emoji}")
 
 
-def generate_stats_report(db: Database) -> str:
+def generate_stats_report(db: Database, chat_id: int, sent_count: int = None) -> str:
     """
     Generate a formatted statistics report for today.
 
     Args:
         db: Database connection
+        chat_id: Telegram chat ID to filter feedback by
+        sent_count: Pre-fetched sent count (avoids redundant re-query on same cursor)
 
     Returns:
         Formatted report message
     """
-    stats = db.get_feedback_stats()
-    batch_count = db.get_batch_count_today()
-    sent_count = db.get_sent_listings_count_today()
+    stats = db.get_feedback_stats(chat_id=chat_id)
+    batch_count = db.get_batch_count_today(chat_id=chat_id)
+    if sent_count is None:
+        sent_count = db.get_sent_listings_count_today(chat_id=chat_id)
 
     # Build header
     current_time = datetime.now().strftime('%H:%M')
@@ -106,8 +110,8 @@ def generate_stats_report(db: Database) -> str:
     message += f"Батчей сегодня: {batch_count}\n"
     message += f"Отправлено объявлений: {sent_count}\n\n"
 
-    # Count totals
-    good_count = stats.get('❤️', {}).get('message_count', 0)
+    # Count totals (Telegram sends ❤ without variation selector)
+    good_count = stats.get('❤', {}).get('message_count', 0)
     bad_count = stats.get('💩', {}).get('message_count', 0)
     error_count = stats.get('🤡', {}).get('message_count', 0)
 
@@ -188,44 +192,77 @@ async def main():
         except Exception as e:
             logger.error(f"Error handling reaction: {e}", exc_info=True)
 
+    def _chat_display_name(chat: types.Chat) -> str:
+        """Extract a human-readable name from a Chat object."""
+        return chat.title or chat.full_name or chat.username or f"chat_{chat.id}"
+
     # /start command
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message):
-        """Handle /start command."""
-        await message.reply(
-            "🤖 *RealtyBot-Bali активен!*\n\n"
-            "📊 Команды:\n"
-            "/stats - показать статистику за сегодня\n"
-            "/favorites - показать все избранные объявления (❤)\n\n"
-            "📝 Отслеживаемые реакции:\n"
-            "❤️ - Хороший вариант\n"
-            "💩 - Плохой вариант\n"
-            "🤡 - Ошибка, требует исправления",
-            parse_mode='Markdown'
-        )
+        """Handle /start command. Always shows chat_id so it can be added to config."""
+        chat = message.chat
+        chat_id = chat.id
+        name = _chat_display_name(chat)
+
+        # Register if not yet known (idempotent — safe to call every time)
+        db.register_chat(chat_id, name)
+        logger.info(f"/start from chat_id={chat_id}, name='{name}', type={chat.type}")
+
+        is_known = db.get_chat_profile(chat_id)
+        is_enabled = is_known.get('enabled', False) if is_known else False
+
+        if not is_enabled:
+            # Not yet configured — show chat_id for copy-paste into profiles.json
+            await message.reply(
+                f"👋 *RealtyBot-Bali*\n\n"
+                f"📋 Chat ID этого чата:\n`{chat_id}`\n\n"
+                f"Добавь этот `chat_id` в `config/profiles.json`, "
+                f"чтобы активировать отправку объявлений.\n\n"
+                f"_Статус: ожидает настройки_",
+                parse_mode='Markdown'
+            )
+        else:
+            # Known and enabled — normal welcome
+            await message.reply(
+                "🤖 *RealtyBot-Bali активен!*\n\n"
+                "📊 Команды:\n"
+                "/stats - показать статистику за сегодня\n"
+                "/favorites - показать все избранные объявления (❤)\n\n"
+                "📝 Отслеживаемые реакции:\n"
+                "❤️ - Хороший вариант\n"
+                "💩 - Плохой вариант\n"
+                "🤡 - Ошибка, требует исправления",
+                parse_mode='Markdown'
+            )
 
     # /stats command - show daily feedback stats
     @dp.message(Command("stats"))
     async def cmd_stats(message: types.Message):
         """Handle /stats command - show today's feedback stats."""
         try:
+            this_chat_id = message.chat.id
+
             # Try today first
-            sent_today = db.get_sent_listings_count_today()
+            sent_today = db.get_sent_listings_count_today(chat_id=this_chat_id)
 
             if sent_today == 0:
+
                 # Nothing sent today, show yesterday's stats
                 from datetime import datetime, timedelta
                 yesterday = datetime.now() - timedelta(days=1)
-                stats = db.get_feedback_stats(since=yesterday)
-                batch_count = db.get_batch_count_today()  # Will check yesterday via fallback
+                stats = db.get_feedback_stats(since=yesterday, chat_id=this_chat_id)
+                batch_count = db.get_batch_count_today(chat_id=this_chat_id)
 
-                # Get sent count for yesterday
-                db.cursor.execute("""
+                # Get sent count for yesterday for this chat
+                db.cursor.execute(
+                    """
                     SELECT COUNT(*)
-                    FROM listings
-                    WHERE status = 'stage5_sent'
-                      AND updated_at::date = (CURRENT_DATE - INTERVAL '1 day')::date
-                """)
+                    FROM listing_profiles
+                    WHERE chat_id = %s
+                      AND sent_at::date = (CURRENT_DATE - INTERVAL '1 day')::date
+                    """,
+                    (this_chat_id,)
+                )
                 sent_yesterday = db.cursor.fetchone()[0]
 
                 # Build report for yesterday
@@ -234,7 +271,7 @@ async def main():
                 message_text += f"Батчей: {batch_count}\n"
                 message_text += f"Отправлено объявлений: {sent_yesterday}\n\n"
 
-                good_count = stats.get('❤️', {}).get('message_count', 0)
+                good_count = stats.get('❤', {}).get('message_count', 0)
                 bad_count = stats.get('💩', {}).get('message_count', 0)
                 error_count = stats.get('🤡', {}).get('message_count', 0)
                 total = good_count + bad_count + error_count
@@ -253,7 +290,6 @@ async def main():
                         error_listings = stats.get('🤡', {}).get('listings', [])
                         for i, listing in enumerate(error_listings[:5], 1):
                             url = listing.get('listing_url', 'N/A')
-                            count = listing.get('reaction_count', 1)
                             message_text += f"{i}. {url}\n"
                         if len(error_listings) > 5:
                             message_text += f"... и ещё {len(error_listings) - 5}\n"
@@ -266,11 +302,13 @@ async def main():
                             url = listing.get('listing_url', 'N/A')
                             message_text += f"{i}. {url}\n"
 
-                message_text += f"\n_Сегодня объявления ещё не отправлялись._"
+                message_text += f"\n_Сегодня объявления ещё не отправлялись._\n\n"
+                message_text += "📈 *Pipeline:*\n" + build_pipeline_stats_message(db, this_chat_id)
                 await message.reply(message_text, parse_mode='Markdown')
             else:
-                # Show today's stats
-                report = generate_stats_report(db)
+                # Show today's stats — pass sent_today to avoid redundant re-query
+                report = generate_stats_report(db, this_chat_id, sent_count=sent_today)
+                report += "\n\n📈 *Pipeline:*\n" + build_pipeline_stats_message(db, this_chat_id)
                 await message.reply(report, parse_mode='Markdown')
 
         except Exception as e:
@@ -282,7 +320,7 @@ async def main():
     async def cmd_favorites(message: types.Message):
         """Handle /favorites command - show all favorite listings."""
         try:
-            favorites = db.get_favorite_listings(limit=50)
+            favorites = db.get_favorite_listings(limit=50, chat_id=message.chat.id)
 
             if not favorites:
                 await message.reply(
@@ -341,7 +379,7 @@ async def main():
     logger.info("🚀 Starting polling...")
 
     try:
-        # Start polling with explicit allowed_updates to receive message_reaction events
+        # Start polling with explicit allowed_updates to receive reactions and chat member events
         await dp.start_polling(bot, allowed_updates=["message", "message_reaction"])
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")

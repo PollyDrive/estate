@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from database import Database
 from property_parser import PropertyParser
 from group_scraper import FacebookGroupScraper
+from config_loader import load_config
 
 # --- Constants ---
 STATE_FILE = 'config/scraper_state.json'
@@ -68,8 +69,7 @@ def main():
     
     load_dotenv()
     
-    with open('config/config.json', 'r', encoding='utf-8') as f:
-        config = json.load(f)
+    config = load_config()
     
     db_url = os.getenv('DATABASE_URL')
     apify_key = os.getenv('APIFY_API_KEY')
@@ -114,15 +114,24 @@ def main():
     
     # --- Filtering Logic ---
     logger.info("Filtering candidates by description/text criteria...")
-    criterias = config.get('criterias', {})
+    _profiles = config.get('chat_profiles', []) or []
+    if not _profiles:
+        logger.error("No chat_profiles found in config. Add profiles to config/profiles.json.")
+        sys.exit(1)
+    criterias = {
+        'bedrooms_min': min(p['bedrooms_min'] for p in _profiles),
+        'price_max': max(p['price_max'] for p in _profiles),
+    }
     stop_words = config.get('filters', {}).get('stop_words', [])
     stop_locations = config.get('filters', {}).get('stop_locations', [])
     candidates = []
     
     for post in all_posts:
-        # For groups, parse description (not title which is empty)
+        # Parse title + description combined (title may contain bedroom count)
         description = post.get('description', '')
-        params = parser.parse(description)
+        title_text = post.get('title', '') or ''
+        parse_text = f"{title_text} {description}".strip()
+        params = parser.parse(parse_text)
         passed, reason = parser.matches_criteria(params, criterias, stage=1)
         
         # Additional stop-word filtering in description text

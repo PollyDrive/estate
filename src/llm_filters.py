@@ -157,126 +157,93 @@ class OpenRouterFilter:
         Returns:
             Tuple of (passed: bool, reason: str, model_used: str)
         """
-        # Extract config values
-        criterias = self.root_config.get("criterias", {})
-        filters = self.root_config.get("filters", {})
+        # Build prompt — GLOBAL filters only (type, location, room-only, term).
+        # Bedroom count and price are profile-specific and handled in stage4 --chat.
+        # NOTE: We do NOT pass profile stop_locations here — those are Bali areas
+        # (Ubud, Seminyak, Kuta, etc.) and belong in stage4 profile filter only.
+        # Stage3 LLM only rejects listings clearly outside Bali/Indonesia.
+        prompt = f"""You are a strict real estate listing filter for Bali, Indonesia rental properties.
+Respond with ONE category code ONLY — no explanation, no punctuation, just the code.
 
-        bedrooms_min = criterias.get("bedrooms_min", 4)
-        price_max = criterias.get("price_max", 40000000)
-        price_max_jt = price_max / 1000000  # Convert to millions for prompt
+RULES (check in this order, return the FIRST match):
 
-        stop_locations = filters.get("stop_locations", [])
-        stop_locations_str = "', '".join(stop_locations) if stop_locations else ""
+0. LOCATION & LANGUAGE (check FIRST):
+   - ACCEPT only Bali, Indonesia rentals
+   - REJECT ONLY if the listing is clearly in a different country or city outside Indonesia:
+     * USA cities/states: New York, NY, NJ, New Jersey, California, CA, Florida, FL, Texas, TX,
+       Los Angeles, Miami, Chicago, Boston, San Francisco, Newark, Brooklyn, Queens, Manhattan
+     * Other countries: Thailand, Philippines, Vietnam, Malaysia, Singapore, Australia,
+       and any European or Latin American locations
+     * American-style terms indicating non-Indonesia listing: 'Ranch', 'basement',
+       'hardwood floors', 'sqft', 'sq ft', 'zip code', 'credit check', 'background check',
+       'security deposit required'
+   - ALL Bali areas are VALID (Ubud, Canggu, Seminyak, Kuta, Kerobokan, Jimbaran,
+     Sanur, Uluwatu, Ungasan, Nusa Dua, Lovina, Singaraja, Tabanan, Gianyar,
+     Denpasar, Buleleng, Karangasem — these are all Bali, Indonesia → ACCEPT)
+   - If location is empty or unknown, check language:
+     * ACCEPT: English, Indonesian, Russian
+     * REJECT: Spanish, Portuguese, French, German, Chinese, Arabic, etc.
+   - IMPORTANT: A listing mentioning a Bali area name (even in passing) is Bali → ACCEPT
+   - Code: REJECT_LOCATION
 
-        # Build prompt from template
-        prompt = f"""You are a very strict real estate filter. Your task is to categorize a listing.
-Respond with ONE category code ONLY.
+1. TYPE — reject non-residential or non-rental:
+   - REJECT sale listings: 'dijual', 'for sale', 'sold', 'forsale', 'leasehold for sale', 'dijual leasehold'
+   - REJECT commercial: 'land for rent', 'tanah disewakan', 'office', 'kos', 'kost', 'warung', 'toko', 'artshop', 'restoran'
+   - REJECT under construction (property itself not ready): 'under construction', 'masih dibangun', 'sedang dibangun', 'finishing stage', 'belum selesai', 'not ready yet'
+   - ACCEPT 'construction nearby' (not the property itself being rented)
+   - ACCEPT 'leasehold' as a rental contract term (long-term lease of land/property rights)
+   - ACCEPT 'tanah' if used only as a location reference (e.g. "Jln Tanah Barak"), not as "tanah disewakan"
+   - IMPORTANT: Residential houses/villas are valid regardless of bedroom count (1BR, 2BR, 3BR, 4BR+ are all allowed in Stage3)
+   - IMPORTANT: 'house', 'rumah', 'villa', 'townhouse', 'apartment', 'loft' are residential types; do NOT reject them as REJECT_TYPE
+   - IMPORTANT: 'X beds Y baths House' or '1 bedroom house/villa' is a valid whole-property rental unless text clearly says room-only/commercial/sale
+   - IMPORTANT: Do NOT infer sale from generic marketing wording like 'dipasarkan', 'marketed', 'available again'
+   - Code: REJECT_TYPE
 
-RULES (check in order):
-0.  **LOCATION & LANGUAGE** (CRITICAL - check FIRST before anything else):
-    -   ONLY ACCEPT listings in BALI, INDONESIA
-    -   REJECT any location outside Indonesia or Bali
-    -   REJECT these locations: '{stop_locations_str}'
-    -   REJECT American-style terms: 'Ranch', 'Townhouse', 'basement', 'hardwood floors' (these indicate USA properties)
-    -   IMPORTANT: If location is EMPTY or missing, carefully check language:
-        * ACCEPT: English, Indonesian (Bahasa Indonesia), Russian
-        * REJECT: Spanish (habitaciones, baño, departamento, casa, recamaras), Portuguese, French, German, Chinese, etc.
-        * If empty location + non-English/Indonesian/Russian language -> 'REJECT_LOCATION' (likely foreign country)
-    -   If non-Indonesian/non-Bali or wrong location or wrong language found -> 'REJECT_LOCATION'
+2. ROOM_ONLY — reject single-room rentals (not a complete property):
+   - REJECT: 'room for rent', 'single room', 'private room', 'spare room', 'renting a room',
+     'sewa kamar', 'kamar untuk disewa', 'kamar saja', '1 room available', 'terima kost', 'kosan'
+   - REJECT shared facilities (guesthouse style): 'sharing pool', 'shared pool', 'sharing kitchen',
+     'shared kitchen', 'dapur bersama' — UNLESS this is clearly a complex with multiple complete units
+   - ACCEPT: 'villa', 'house', 'rumah', 'apartment', 'townhouse', 'loft', 'entire place', 'whole house', 'complete unit'
+   - ACCEPT: '1 bedroom villa/house', '2BR house', '4 beds 4 baths house' = complete property with its own rooms = ACCEPT here
+   - IMPORTANT: If listing presents one full unit with private kitchen/living/bathroom/garden/pool, treat as whole property (PASS this rule), not room-only
+   - Code: REJECT_ROOM_ONLY
 
-1.  **TYPE**:
-    -   REJECT these sale/commercial types: 'dijual', 'for sale', 'sold', 'land', 'tanah', 'office', 'kos', 'kost', 'warung', 'tempat jualan', 'toko'.
-    -   REJECT under construction: 'under construction', 'masih dibangun', 'sedang dibangun', 'finishing stage', 'belum selesai', 'not ready', 'will be ready'.
-    -   ACCEPT 'construction nearby' or 'construction next door' (not under construction itself).
-    -   CRITICAL: IGNORE 'leasehold' if it's describing rental contract duration (e.g., 'Leasehold 19 Years' = rental contract term = ACCEPT).
-    -   ONLY reject 'leasehold' if combined with sale words: 'leasehold for sale', 'dijual leasehold', 'selling leasehold'.
-    -   If REJECT reason found -> 'REJECT_TYPE'.
+3. TERM — reject short-term only listings:
+   - REJECT if ONLY short-term available: 'daily', 'harian', '/day', 'per day', '/hari',
+     'nightly', 'per night', '/night', 'weekly', 'mingguan', '/week', 'hourly', '/jam'
+   - ACCEPT if listing offers BOTH short-term and long-term (e.g. 'daily / monthly / yearly')
+   - ACCEPT: monthly, yearly, long-term, or no term mentioned (default = long-term)
+   - ACCEPT: '/th' = '/tahun' = yearly = OK, 'bulanan' = monthly = OK
+   - Code: REJECT_TERM
 
-1.5 **ROOM_ONLY** (CRITICAL - check for single room rentals):
-    -   Check if listing is for a SINGLE ROOM inside a house/villa (not a complete property)
-    -   Reject patterns: 'room for rent', 'single room', 'private room', 'kamar untuk disewa', 'kamar saja', 'sewa kamar', 'room only', 'one room', '1 room available', 'spare room', 'renting a room'
-    -   Accept patterns: 'villa', 'house', 'rumah', 'apartment', 'complete unit', 'entire place', 'whole house'
-    -   IMPORTANT: '1 bedroom villa' = complete villa with 1 bedroom = OK for this rule (but rejected in BEDROOMS rule)
-    -   IMPORTANT: 'room for rent' without mention of complete property = REJECT_ROOM_ONLY
-    -   If found room only -> 'REJECT_ROOM_ONLY'
-
-2.  **BEDROOMS** (CRITICAL - read VERY carefully):
-    -   ACCEPT ONLY if description mentions {bedrooms_min} or more bedrooms
-    -   Valid forms for {bedrooms_min}+ bedrooms: '{bedrooms_min} bed', '{bedrooms_min}BR', '{bedrooms_min}kt', '{bedrooms_min+1} bed', '{bedrooms_min+1}BR', '{bedrooms_min+1}kt', etc.
-    -   REJECT if fewer than {bedrooms_min} bedrooms: '1 bed', '2BR', '{bedrooms_min-1}kt', '{bedrooms_min-1} kamar', 'one/two/three bedroom' -> 'REJECT_BEDROOMS'
-    -   REJECT if studio -> 'REJECT_BEDROOMS'
-    -   REJECT if NO bedroom count mentioned in description -> 'REJECT_BEDROOMS'
-    -   IMPORTANT: Listings with less than {bedrooms_min} bedrooms must be REJECT_BEDROOMS
-    -   IMPORTANT: '{bedrooms_min}KT' = {bedrooms_min} bedrooms = ACCEPT
-    -   IMPORTANT: If description only lists facilities without bedroom count -> 'REJECT_BEDROOMS'
-
-3.  **TERM** (CRITICAL - read carefully):
-    -   ONLY REJECT for daily/weekly/hourly rentals:
-        * 'daily', 'harian', '/day', 'per day', '/hari'
-        * 'nightly', 'per night', '/night'
-        * 'weekly', 'mingguan', '/week', '/minggu'
-        * 'hourly', 'per hour', '/jam'
-        * If found -> 'REJECT_TERM'
-    -   ACCEPT for ALL other rental terms including:
-        * Monthly: 'monthly', 'bulanan', '/month', '/mo', '/bulan', 'per month', 'per bulan'
-        * Yearly: 'yearly', 'tahunan', '/year', '/tahun', '/th', 'per year', 'per tahun' (ALL yearly formats accepted!)
-        * Multi-year: '2 tahun', '3 years', '5 tahun' (prices already converted to monthly)
-        * Long-term: 'minimal 6 bulan', 'minimal 1 tahun', 'minimum 2 years', 'long term', 'kontrak tahunan'
-        * Mixed: 'monthly or yearly', 'bulanan atau tahunan', 'for rent'
-        * Upfront: '6 months upfront', '1 year upfront' (this is OK - long-term commitment)
-        * No term mentioned (assume monthly/long-term by default)
-    -   IMPORTANT: ALL yearly rentals are ACCEPTED because prices are already converted to monthly
-    -   IMPORTANT: '/th' = '/tahun' = per year = ACCEPT (not reject!)
-
-5.  **PRICE** (IMPORTANT - check carefully):
-    -   Look for monthly price: numbers followed by 'jt', 'juta', 'million', 'm', 'mln', 'mil', 'IDR', 'Rp'
-    -   If price is stated as YEARLY (e.g., '180 mln/year'), calculate monthly: yearly_price / 12
-    -   If monthly price > {price_max_jt}jt IDR -> 'REJECT_PRICE'
-    -   CRITICAL: If yearly price > {price_max_jt * 12}jt/year -> REJECT_PRICE (>{price_max_jt}jt/month)
-    -   Examples of TOO EXPENSIVE (>{price_max_jt}jt/month): {price_max_jt + 1}jt, {price_max_jt + 10}m, {price_max_jt + 20} million, {price_max_jt * 12 + 50} mln/year
-    -   Examples of OK (<= {price_max_jt}jt/month): 10jt, 12m, 15 million, {price_max_jt}jt, {price_max_jt * 12} mil/year (={price_max_jt} mil/month)
-
-If you find a rejection, return the FIRST rejection code you find.
-If ALL rules are 'PASS', return 'PASS'.
+If none of the above apply → PASS
 
 EXAMPLES:
-- Description: '{bedrooms_min}BR house in New York, $2000/month' -> REJECT_LOCATION (USA location)
-- Description: '{bedrooms_min}-Bedroom House for Rent – Staten Island' -> REJECT_LOCATION (USA - Staten Island)
-- Description: 'Beautiful Remodeled Ranch offering {bedrooms_min} Bedrooms with basement and hardwood floors' -> REJECT_LOCATION (USA - Ranch with basement)
-- Description: 'Villa in Miami Beach, {bedrooms_min-1}BR, furnished' -> REJECT_LOCATION (Florida, USA)
-- Description: 'Apartment in Bangkok, {bedrooms_min}BR, 15000 THB' -> REJECT_LOCATION (Thailand)
-- Description: 'House in Kuala Lumpur, Malaysia' -> REJECT_LOCATION (Malaysia)
-- Description: 'Villa 1BR in Ubud, 10jt/month' -> REJECT_BEDROOMS (1 bedroom)
-- Description: 'Studio apartment with kitchen' -> REJECT_BEDROOMS (studio)
-- Description: '2 KT 1 Kamar Mandi - Rumah, 12jt/month' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-1} KT 2 KM - Rumah, 15jt/month' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min}BR villa Cemagi, 12jt/month' -> PASS ({bedrooms_min} bedrooms, OK!)
-- Description: '{bedrooms_min+1}BR villa, 14jt/month' -> PASS ({bedrooms_min+1} bedrooms, acceptable)
-- Description: 'Land for rent, 5jt/month' -> REJECT_TYPE (land)
-- Description: 'Menerima kos perempuan' -> REJECT_TYPE (kos)
-- Description: 'Di sewa tempat jualan' -> REJECT_TYPE (tempat jualan)
-- Description: '{bedrooms_min}BR villa under construction, 80% finished, 12jt' -> REJECT_TYPE (under construction)
-- Description: 'New house masih dibangun, available next month' -> REJECT_TYPE (sedang dibangun)
-- Description: '{bedrooms_min-1}BR villa, 95% done, on finishing stage, 15jt' -> REJECT_TYPE (finishing stage)
-- Description: '{bedrooms_min-2}BR house leasehold for sale, 500jt' -> REJECT_TYPE (leasehold sale)
-- Description: '{bedrooms_min-1}BR villa, leasehold 20 years, 10jt/month' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-2}BR, construction nearby, 12jt/month' -> REJECT_BEDROOMS (nearby construction OK but <{bedrooms_min} bedrooms)
-- Description: 'Room for rent in shared house, 3jt/month' -> REJECT_ROOM_ONLY (single room)
-- Description: 'Private room available in villa, 4jt' -> REJECT_ROOM_ONLY (room only)
-- Description: 'Sewa kamar di rumah, AC, 5jt/bulan' -> REJECT_ROOM_ONLY (kamar saja)
-- Description: 'Facilities: AC, TV, kitchen' -> REJECT_BEDROOMS (no bedroom count)
-- Description: '1 building 1 room with AC' -> REJECT_BEDROOMS (1 room)
-- Description: 'Villa {bedrooms_min-2}BR, 150jt/year' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-2}BR Villa, 180 mln/year' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-1} kamar tidur, hrg 12jt/th nett' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-2}BR house, 100mln/6 months upfront' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-1}BR Villa, unfurnished, 14jt/month' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-2}BR, minimal 1 tahun, 15jt/month' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-2} bedroom house, daily rent, 500k/day' -> REJECT_TERM (daily rental)
-- Description: 'Villa nightly rental, 2jt/night' -> REJECT_TERM (nightly rental)
-- Description: '{bedrooms_min-2} bedroom house, monthly rent, 15jt' -> REJECT_BEDROOMS
-- Description: '{bedrooms_min-2}BR Villa, beautiful, 500jt' -> REJECT_BEDROOMS
-- Description: 'Two bedroom villa with pool, 14jt/month' -> REJECT_BEDROOMS
+- '4BR house in New York, $2000/month' → REJECT_LOCATION
+- 'Ranch 4 Bedrooms with basement, hardwood floors, sqft' → REJECT_LOCATION
+- 'Apartment in Bangkok, 15000 THB/month' → REJECT_LOCATION
+- 'House in Kuala Lumpur, Malaysia' → REJECT_LOCATION
+- 'Habitaciones en renta, 2 recamaras, Ciudad de Mexico' → REJECT_LOCATION
+- 'Land for rent 5jt/month' → REJECT_TYPE
+- 'Menerima kos perempuan saja' → REJECT_TYPE
+- 'Villa 80% finished, not ready yet, under construction' → REJECT_TYPE
+- 'Dijual villa 3BR leasehold 500jt' → REJECT_TYPE
+- 'Room for rent in shared house, 3jt/month' → REJECT_ROOM_ONLY
+- 'Private room available in villa, 4jt' → REJECT_ROOM_ONLY
+- 'Villa nightly rental, 2jt/night' → REJECT_TERM
+- '2 bedroom house, daily only, 500k/day' → REJECT_TERM
+- '1BR villa in Canggu, 5jt/month' → PASS
+- '4BR villa in Pererenan, 35jt/month' → PASS
+- 'Villa Ubud with pool, leasehold 20 years, 10jt/month' → PASS
+- 'Rumah 3 kamar, bulanan 8jt, Seminyak' → PASS
+- '2 KT 1 KM, near Kuta, 6jt/bulan' → PASS
+- 'Villa Kerobokan 2BR, 15min to Canggu and Seminyak, 12jt/month' → PASS
+- 'New villa in Seseh area, 2 story, private pool, 18jt/month' → PASS
+- 'Villa Ubud forest view, day use / bulanan / tahunan, sharing pool' → REJECT_ROOM_ONLY
+- 'Rumah Jimbaran 3 kamar, 13jt/bulan' → PASS
+- 'Rumah Ungasan 3BR monthly, 10jt' → PASS
+- 'Villa Sanur 4BR, monthly/yearly, private pool' → PASS
 
 Description:
 {description}
@@ -294,7 +261,8 @@ CATEGORY:"""
         m = re.search(r"\b(PASS|REJECT_[A-Z_]+)\b", answer)
         code = m.group(1) if m else (answer.splitlines()[0].strip() if answer else "")
         if not code:
-            raise LLMProcessingError("Empty OpenRouter response")
+            logger.warning("OpenRouter filter: empty response, fallback reject")
+            return False, "REJECT_TYPE (malformed/empty LLM response)", self.client.model
 
         if code == "PASS":
             logger.info("OpenRouter filter: PASS")
@@ -303,7 +271,19 @@ CATEGORY:"""
             logger.info(f"OpenRouter filter: {code}")
             return False, code, self.client.model
 
-        raise LLMProcessingError(f"Unexpected OpenRouter response: {answer}")
+        # Fail-safe for truncated model output (e.g. "RE", "REJ", "REJECT")
+        # or other malformed one-token replies: reject listing, do not crash pipeline.
+        code_upper = code.upper()
+        if code_upper.startswith("RE"):
+            logger.warning(
+                f"OpenRouter filter: malformed reject token '{code}', fallback reject"
+            )
+            return False, "REJECT_TYPE (malformed LLM response)", self.client.model
+
+        logger.warning(
+            f"OpenRouter filter: unexpected response '{answer[:120]}', fallback reject"
+        )
+        return False, "REJECT_TYPE (unexpected LLM response)", self.client.model
 
 
 # Backwards-compatible alias (avoid breaking older imports)

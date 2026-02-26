@@ -11,14 +11,14 @@ import logging
 import re
 from pathlib import Path
 from dotenv import load_dotenv
-import json
-
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from database import Database
 from llm_filters import OpenRouterFilter
 from telegram_notifier import TelegramNotifier
+from config_loader import load_config
+from property_parser import PropertyParser
 
 # Setup logging
 logging.basicConfig(
@@ -71,6 +71,8 @@ def _matches_stop_location(location: str, llm_text: str, stop_loc: str) -> bool:
     return _token_match(location, clean) or _token_match(llm_text, clean)
 
 
+
+
 def main():
     """Run Stage 3: LLM analysis for unprocessed listings"""
 
@@ -82,12 +84,8 @@ def main():
     load_dotenv()
 
     # Load config
-    config_path = 'config/config.json'
-    if not os.path.exists(config_path):
-        config_path = '/app/config/config.json'
-
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
+    config = load_config()
+    parser = PropertyParser(config)
 
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
@@ -108,6 +106,27 @@ def main():
         sys.exit(1)
 
     try:
+        # Sync chat_profiles from config → DB
+        chat_profiles_cfg = config.get('chat_profiles', []) or []
+        with Database() as db:
+            if chat_profiles_cfg:
+                db.sync_chat_profiles(chat_profiles_cfg)
+                logger.info(f"✓ Synced {len(chat_profiles_cfg)} chat profiles to DB")
+            enabled_profiles = db.get_enabled_chat_profiles()
+        logger.info(f"✓ Loaded {len(enabled_profiles)} enabled profiles: "
+                    f"{[p['name'] for p in enabled_profiles]}")
+
+        # Build union of allowed_locations from all enabled profiles (for geo-check)
+        all_allowed_locations = []
+        for p in enabled_profiles:
+            for loc in (p.get('allowed_locations') or []):
+                if loc not in all_allowed_locations:
+                    all_allowed_locations.append(loc)
+
+        if not enabled_profiles:
+            logger.error("No enabled chat profiles found in DB. Add profiles to config/profiles.json and re-run.")
+            sys.exit(1)
+
         # Initialize OpenRouter filter
         try:
             llm_filter = OpenRouterFilter(config, openrouter_api_key)
@@ -145,8 +164,6 @@ def main():
         passed_count = 0
         failed_count = 0
         error_count = 0
-        criterias = config.get('criterias', {}) or {}
-        max_price = float(criterias.get('price_max', 40000000))
         enforce_stop_locations = bool(config.get('filters', {}).get('enforce_stop_locations', False))
 
         with Database() as db:
@@ -156,6 +173,7 @@ def main():
                 title = listing.get('title') or ''
                 location = listing.get('location') or ''
                 llm_text = description.strip() if description and description.strip() else title.strip()
+                parse_text = f"{title} {description}".strip()
                 text_mode = "description" if description and description.strip() else "title-only"
 
                 logger.info(f"\nAnalyzing {fb_id}: {title[:50] if title else 'No title'}...")
@@ -173,23 +191,15 @@ def main():
                     logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
                     continue
 
-                # Check location against stop_locations FIRST
+                # Check location against global stop_locations FIRST
                 stop_locations = config.get('filters', {}).get('stop_locations', [])
-                allowed_locations = criterias.get('allowed_locations', [])
-                allowed_locations_lower = [a.lower() for a in allowed_locations]
+                allowed_locations_lower = [a.lower() for a in all_allowed_locations]
                 location_lower = location.lower() if location else ''
-                llm_text_lower = llm_text.lower() if llm_text else ''
 
                 passed = True
                 reason = None
 
-                # Hard gate: reject only explicit 1/2/3 bedroom listings.
-                bedrooms = listing.get('bedrooms')
-                if bedrooms is not None and bedrooms < 4:
-                    passed = False
-                    reason = f"REJECT_BEDROOMS (need 4+, got: {bedrooms})"
-                    logger.info(f"  ✗ FILTERED: {reason} → status: stage3_failed")
-
+                # Pre-filter: stop_locations (deterministic, no LLM call needed).
                 for stop_loc in stop_locations:
                     if not passed:
                         break
@@ -206,7 +216,7 @@ def main():
 
                 # If location is empty or not in allowed_locations, ask LLM to determine country.
                 # This catches USA/other-country listings that slip through with blank location.
-                if passed and allowed_locations:
+                if passed and all_allowed_locations:
                     location_known = location_lower and any(
                         loc in location_lower for loc in allowed_locations_lower
                     )
@@ -245,30 +255,28 @@ def main():
                 # If location check passed, run OpenRouter analysis
                 if passed:
                     try:
+                        # Secondary structured parse to avoid carrying unknown bedrooms
+                        # into stage4 where profile checks require concrete bedroom counts.
+                        parsed = parser.parse(parse_text) if parse_text else {}
+                        parsed_bedrooms = parsed.get("bedrooms")
+                        current_bedrooms = listing.get("bedrooms")
+                        try:
+                            parsed_bedrooms = int(parsed_bedrooms) if parsed_bedrooms is not None else None
+                        except Exception:
+                            parsed_bedrooms = None
+                        try:
+                            current_bedrooms = int(current_bedrooms) if current_bedrooms is not None else None
+                        except Exception:
+                            current_bedrooms = None
+
+                        # Replace NULL/invalid bedroom values with sane parsed value.
+                        # Prevents anomalies like postal codes being treated as bedrooms.
+                        if parsed_bedrooms is not None and 0 <= parsed_bedrooms <= 20:
+                            if current_bedrooms is None or current_bedrooms < 0 or current_bedrooms > 20:
+                                listing["bedrooms"] = parsed_bedrooms
+
                         passed, reason, model_used = llm_filter.filter(llm_text)
                         reject_type = _extract_reject_type(reason)
-
-                        # Deterministic overrides for known false negatives.
-                        # IMPORTANT: never override REJECT_LOCATION — geo check is authoritative.
-                        if not passed and reject_type == "REJECT_BEDROOMS":
-                            bedrooms = listing.get('bedrooms')
-                            if bedrooms is not None and bedrooms >= 4:
-                                passed = True
-                                reason = f"PASS_OVERRIDE_BEDROOMS (structured bedrooms={bedrooms})"
-                                reject_type = ""
-
-                        if not passed and reject_type == "REJECT_PRICE":
-                            extracted_price = listing.get('price_extracted')
-                            try:
-                                extracted_price_f = float(extracted_price) if extracted_price is not None else None
-                            except Exception:
-                                extracted_price_f = None
-                            if extracted_price_f is not None and extracted_price_f <= max_price:
-                                passed = True
-                                reason = (
-                                    f"PASS_OVERRIDE_PRICE (structured price={extracted_price_f:.0f} <= {max_price:.0f})"
-                                )
-                                reject_type = ""
 
                         # Update status based on LLM result
                         new_status = 'stage3' if passed else 'stage3_failed'
@@ -276,8 +284,8 @@ def main():
 
                         # Save LLM analysis result
                         db.cursor.execute(
-                            "UPDATE listings SET status = %s, llm_reason = %s, pass_reason = %s, llm_passed = %s, llm_model = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
-                            (new_status, reason, pass_reason, passed, model_used, fb_id)
+                            "UPDATE listings SET status = %s, llm_reason = %s, pass_reason = %s, llm_passed = %s, llm_model = %s, bedrooms = %s, llm_analyzed_at = NOW() WHERE fb_id = %s",
+                            (new_status, reason, pass_reason, passed, model_used, listing.get("bedrooms"), fb_id)
                         )
                         db.conn.commit()
 
@@ -307,6 +315,8 @@ def main():
                     )
                     db.conn.commit()
                     failed_count += 1
+
+                # listing_profiles are filled in stage4 --chat, not here.
 
         # Summary
         logger.info("=" * 80)

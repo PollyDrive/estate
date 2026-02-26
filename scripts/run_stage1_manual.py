@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from database import Database
 from property_parser import PropertyParser
 from apify_scraper import ApifyScraper
-import json
+from config_loader import load_config
 
 # Setup logging
 logging.basicConfig(
@@ -41,12 +41,7 @@ def main():
     load_dotenv()
     
     # Load config
-    config_path = Path(__file__).parent.parent / 'config' / 'config.json'
-    if not config_path.exists():
-        config_path = Path('/app/config/config.json')
-    
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
+    config = load_config()
     
     # Get credentials
     db_url = os.getenv('DATABASE_URL')
@@ -75,7 +70,14 @@ def main():
     
     # Filter by title
     logger.info("Filtering candidates by title criteria...")
-    criterias = config.get('criterias', {})
+    _profiles = config.get('chat_profiles', []) or []
+    if not _profiles:
+        logger.error("No chat_profiles found in config. Add profiles to config/profiles.json.")
+        sys.exit(1)
+    criterias = {
+        'bedrooms_min': min(p['bedrooms_min'] for p in _profiles),
+        'price_max': max(p['price_max'] for p in _profiles),
+    }
     candidates = []
     
     for listing in stage1_listings:

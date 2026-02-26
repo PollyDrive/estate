@@ -23,9 +23,6 @@ COPY cookies/ ./cookies/
 # Create logs directory
 RUN mkdir -p logs
 
-# Make main.py executable
-RUN chmod +x src/main.py
-
 # Copy crontab file
 COPY crontab /etc/cron.d/realty-bot-cron
 

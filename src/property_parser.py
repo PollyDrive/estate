@@ -23,20 +23,37 @@ class PropertyParser:
         
         # Bedroom patterns
         self.bedroom_patterns = [
-            r'(\d+)\s*(?:br|bedroom|bedrooms|kamar tidur)',
-            r'(\d+)\s*kt\b',  # KT = Kamar Tidur (Indonesian for bedroom)
-            r'(\d+)\s*bed',
-            r'studio',  # Special case: 0 bedrooms
+            r'(?<!\d)(\d{1,2})[\s-]*(?:br|bedroom|bedrooms|kamar tidur)\b',
+            r'(?<!\d)(\d{1,2})[\s-]*kt\b',   # KT = Kamar Tidur
+            r'(?<!\d)(\d{1,2})[\s-]*beds?\b',
+            r'\bstudio\b',  # Special case: 0 bedrooms
         ]
+        # Spelled-out English numbers for bedroom counts (e.g. "Four bedroom villa")
+        self._word_to_num = {
+            'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+            'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        }
+        self._word_bedroom_pattern = re.compile(
+            r'\b(one|two|three|four|five|six|seven|eight|nine|ten)[\s-]*(?:bed(?:room)?s?|br)\b',
+            re.IGNORECASE
+        )
         
-        # Price patterns (IDR)
+        # USD → IDR conversion rate (approximate, for filtering purposes)
+        self._usd_to_idr = 16_300
+
+        # Price patterns — USD detected separately, then IDR
+        self.usd_price_pattern = re.compile(
+            r'(?:usd|\$|us\$)\s*(\d[\d,]*(?:\.\d+)?)'  # $4,000 / USD 4000 / US$3,500
+            r'|(\d[\d,]*(?:\.\d+)?)\s*(?:usd|dollars?)',  # 4000 USD / 4000 dollars
+            re.IGNORECASE
+        )
         self.price_patterns = [
             # 3.5 million, 10 juta, 3,5 juta (with decimal point or comma)
             r'(\d+[.,]\d+)\s*(?:jt|juta|million|m)\b',
             # Whole number with jt/juta/million (10 juta, 5jt)
             r'(\d+)\s*(?:jt|juta|million|m)\b',
-            # Special formats: 180mln, 250mio, 90mill (no space between number and unit)
-            r'(\d+)\s*(?:mln|mio|mill)\b',
+            # Special formats: 180mln, 250mio, 90mill, 25mil
+            r'(\d+)\s*(?:mln|mio|mill|mil)\b',
             # IDR/Rp followed by number (treat as millions if < 100)
             r'(?:rp|idr)[\s.]?(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)\s*(?:jt|juta|jt/bln|juta/bulan|million|m)?',
             # Any number with thousand separators (full format like 10.000.000)
@@ -255,20 +272,78 @@ class PropertyParser:
         }
     
     def _extract_bedrooms(self, text: str) -> Optional[int]:
-        """Extract number of bedrooms."""
+        """Extract number of bedrooms with sanity guard."""
+        def _sane(n: int) -> bool:
+            # Guard against postal codes / IDs being mistaken for bedroom count.
+            return 0 <= n <= 20
+
         for pattern in self.bedroom_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                if pattern == r'studio':
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                if pattern == r'\bstudio\b':
                     return 0
                 try:
-                    return int(match.group(1))
+                    n = int(match.group(1))
                 except (ValueError, IndexError):
                     continue
+                if _sane(n):
+                    return n
+        # Fallback: spelled-out numbers ("Four bedroom", "two-bed", etc.)
+        match = self._word_bedroom_pattern.search(text)
+        if match:
+            return self._word_to_num.get(match.group(1).lower())
         return None
     
     def _extract_price(self, text: str) -> Optional[float]:
-        """Extract price in IDR (returns monthly price)."""
+        """Extract price in IDR (returns monthly price).
+        USD prices are converted to IDR using self._usd_to_idr rate so that
+        non-Bali listings with dollar prices will exceed IDR price_max thresholds.
+        """
+        # Normalize broken number formatting like "20. 000,000" -> "20.000,000"
+        text = re.sub(r'(?<=\d)([.,])\s+(?=\d)', r'\1', text or "")
+
+        monthly_indicators = [
+            r'monthly',
+            r'/month',
+            r'per month',
+            r'\bmonth\b',
+            r'/mo\b',
+            r'bulanan',
+            r'/bulan',
+            r'per bulan',
+            r'\bbln\b',
+        ]
+        yearly_indicators = [
+            r'yearly',
+            r'/year',
+            r'per year',
+            r'\byear\b',
+            r'tahunan',
+            r'/tahun',
+            r'per tahun',
+            r'/yr',
+        ]
+
+        def _is_yearly_context(ctx: str) -> bool:
+            has_yearly = any(re.search(ind, ctx) for ind in yearly_indicators)
+            has_monthly = any(re.search(ind, ctx) for ind in monthly_indicators)
+            # Do NOT divide by 12 when both monthly and yearly are present nearby.
+            return has_yearly and not has_monthly
+
+        # ── USD detection (checked first to avoid IDR patterns grabbing the number) ──
+        m = self.usd_price_pattern.search(text)
+        if m:
+            raw = (m.group(1) or m.group(2) or '').replace(',', '')
+            try:
+                usd_amount = float(raw)
+                idr_price = usd_amount * self._usd_to_idr
+                # Apply yearly→monthly conversion if needed
+                context = text[max(0, m.start()-50):min(len(text), m.end()+50)].lower()
+                if _is_yearly_context(context):
+                    idr_price /= 12
+                return idr_price
+            except (ValueError, TypeError):
+                pass
+
         for pattern in self.price_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -278,7 +353,7 @@ class PropertyParser:
                     
                     # Handle million/juta formats including mln, mio, mill
                     if ('jt' in matched_text or 'juta' in matched_text or 'million' in matched_text or 
-                        'mln' in matched_text or 'mio' in matched_text or 'mill' in matched_text or 
+                        'mln' in matched_text or 'mio' in matched_text or 'mill' in matched_text or 'mil' in matched_text or
                         matched_text.strip().endswith('m')):
                         # Replace comma with dot for decimal (3,5 → 3.5)
                         price_str_normalized = price_str.replace(',', '.')
@@ -300,21 +375,8 @@ class PropertyParser:
                     end_pos = min(len(text), match.end() + 50)
                     context = text[start_pos:end_pos].lower()
                     
-                    yearly_indicators = [
-                        r'yearly',
-                        r'year',
-                        r'/year',
-                        r'per year',
-                        r'tahunan',
-                        r'/tahun',
-                        r'per tahun',
-                        r'/yr',
-                    ]
-                    
-                    is_yearly = any(re.search(indicator, context) for indicator in yearly_indicators)
-                    
                     # Convert yearly to monthly if needed
-                    if is_yearly:
+                    if _is_yearly_context(context):
                         price = price / 12
                     
                     return price
@@ -515,20 +577,17 @@ class PropertyParser:
         if params.get('rental_term') in ['daily', 'weekly']:
             return False, f"Rental term: {params['rental_term']}"
         
-        # 3. Check bedrooms:
-        # reject only explicit 1/2/3 BR, do not reject unknown bedroom count here.
-        bedrooms_min = criteria.get('bedrooms_min', 4)
+        # 3. Check bedrooms: reject only explicit low BR counts; skip if not in criteria
+        bedrooms_min = criteria.get('bedrooms_min')
         bedrooms = params.get('bedrooms')
-        if bedrooms is not None and bedrooms < bedrooms_min:
+        if bedrooms_min is not None and bedrooms is not None and bedrooms < bedrooms_min:
             return False, f"Bedrooms: {bedrooms} (need {bedrooms_min}+)"
-        
-        # 4. Check price range
+
+        # 4. Check price range: skip if not in criteria
         price = params.get('price')
-        
-        if price:
-            max_price = criteria.get('price_max', criteria.get('default_price', {}).get('max', 16000000))
-            if price > max_price:
-                return False, f"Price {price:,.0f} > {max_price:,.0f}"
+        max_price = criteria.get('price_max')
+        if price and max_price is not None and price > max_price:
+            return False, f"Price {price:,.0f} > {max_price:,.0f}"
         
         # 5. Kitchen check REMOVED - too many false negatives
         # Kitchen info is often mentioned but not parsed correctly

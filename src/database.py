@@ -295,33 +295,61 @@ class Database:
             logger.error(f"Error logging batch completion: {e}")
             self.conn.rollback()
 
-    def get_batch_count_today(self) -> int:
+    def get_batch_count_today(self, chat_id: Optional[int] = None) -> int:
         """
-        Get the number of completed batches today.
-        Falls back to counting sent listings if batch_runs is empty.
+        Get the number of completed batches today for a specific chat.
+
+        Args:
+            chat_id: Telegram chat ID to filter by (required for per-chat stats).
+                     If None, returns global count across all chats (legacy).
 
         Returns:
-            Number of completed batches for today (or listing count / 10)
-        """
-        query = """
-            SELECT COUNT(*)
-            FROM batch_runs
-            WHERE batch_date = CURRENT_DATE
-              AND status = 'completed'
+            Number of completed batches for today for the given chat.
         """
         try:
-            self.cursor.execute(query)
+            self.conn.rollback()  # reset any aborted transaction from a prior query
+            if chat_id is not None:
+                self.cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM batch_runs
+                    WHERE batch_date = CURRENT_DATE
+                      AND status = 'completed'
+                      AND chat_id = %s
+                    """,
+                    (chat_id,)
+                )
+            else:
+                self.cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM batch_runs
+                    WHERE batch_date = CURRENT_DATE
+                      AND status = 'completed'
+                    """
+                )
             count = self.cursor.fetchone()[0]
 
-            # If no batch_runs data, estimate from sent listings (10 per batch)
+            # Fallback: estimate from listing_profiles sent today for this chat
             if count == 0:
-                query_fallback = """
-                    SELECT COUNT(*)
-                    FROM listings
-                    WHERE status = 'stage5_sent'
-                      AND updated_at::date = CURRENT_DATE
-                """
-                self.cursor.execute(query_fallback)
+                if chat_id is not None:
+                    self.cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM listing_profiles
+                        WHERE chat_id = %s
+                          AND sent_at::date = CURRENT_DATE
+                        """,
+                        (chat_id,)
+                    )
+                else:
+                    self.cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM listing_profiles
+                        WHERE sent_at::date = CURRENT_DATE
+                        """
+                    )
                 sent_count = self.cursor.fetchone()[0]
                 return (sent_count + 9) // 10  # Round up to nearest batch
 
@@ -330,114 +358,163 @@ class Database:
             logger.error(f"Error getting batch count: {e}")
             return 0
 
-    def get_sent_listings_count_today(self) -> int:
+    def get_sent_listings_count_today(self, chat_id: Optional[int] = None) -> int:
         """
-        Get total number of listings sent today.
+        Get total number of listings sent today for a specific chat.
+
+        Uses listing_profiles.sent_at as the authoritative source —
+        listings.updated_at is unreliable (not updated on re-send to new chats).
+
+        Args:
+            chat_id: Telegram chat ID to filter by. If None, counts across all chats.
 
         Returns:
-            Number of listings sent today
-        """
-        query = """
-            SELECT COUNT(*)
-            FROM listings
-            WHERE status = 'stage5_sent'
-              AND updated_at::date = CURRENT_DATE
+            Number of listings sent today for the given chat.
         """
         try:
-            self.cursor.execute(query)
+            self.conn.rollback()  # reset any aborted transaction from a prior query
+            if chat_id is not None:
+                self.cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM listing_profiles
+                    WHERE chat_id = %s
+                      AND sent_at::date = CURRENT_DATE
+                    """,
+                    (chat_id,)
+                )
+            else:
+                self.cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM listing_profiles
+                    WHERE sent_at::date = CURRENT_DATE
+                    """
+                )
             count = self.cursor.fetchone()[0]
             return count or 0
         except Exception as e:
             logger.error(f"Error getting sent listings count: {e}")
             return 0
 
-    def save_reaction(self, telegram_message_id: int, fb_id: str, reaction_type: str):
+    def save_reaction(self, telegram_message_id: int, fb_id: str, reaction_type: str, chat_id: Optional[int] = None):
         """
         Save or increment a reaction count.
 
         Args:
             telegram_message_id: Telegram message ID
             fb_id: Facebook listing ID
-            reaction_type: Emoji reaction ('❤️', '💩', '🤡')
+            reaction_type: Emoji reaction ('❤', '💩', '🤡')
+            chat_id: Telegram chat ID (profile identifier)
         """
         query = """
-            INSERT INTO feedback (telegram_message_id, fb_id, reaction_type, reaction_count, first_seen_at, last_updated_at)
-            VALUES (%s, %s, %s, 1, NOW(), NOW())
+            INSERT INTO feedback (telegram_message_id, fb_id, reaction_type, reaction_count, first_seen_at, last_updated_at, chat_id)
+            VALUES (%s, %s, %s, 1, NOW(), NOW(), %s)
             ON CONFLICT (telegram_message_id, reaction_type)
             DO UPDATE SET
                 reaction_count = feedback.reaction_count + 1,
-                last_updated_at = NOW()
+                last_updated_at = NOW(),
+                chat_id = COALESCE(EXCLUDED.chat_id, feedback.chat_id)
         """
         try:
-            self.cursor.execute(query, (telegram_message_id, fb_id, reaction_type))
+            self.cursor.execute(query, (telegram_message_id, fb_id, reaction_type, chat_id))
             self.conn.commit()
             logger.info(f"Saved reaction {reaction_type} for message {telegram_message_id} (fb_id: {fb_id})")
         except Exception as e:
             logger.error(f"Error saving reaction: {e}")
             self.conn.rollback()
 
-    def get_feedback_stats(self, since=None) -> Dict[str, Any]:
+    def get_feedback_stats(self, since=None, chat_id: Optional[int] = None) -> Dict[str, Any]:
         """
-        Get aggregated feedback statistics for listings sent today.
+        Get aggregated feedback statistics for listings sent to a specific chat.
+
+        Uses listing_profiles.sent_at as the authoritative send-date source.
+        listings.updated_at is NOT used (it reflects the last write to the listings
+        row, not the per-chat send time).
 
         Args:
-            since: Optional date to filter by listing send date (default: today)
+            since: Optional date to filter by send date (default: today).
+                   Pass a datetime object; its .date() is used.
+            chat_id: Telegram chat ID to filter by (required for correct stats).
+                     If None, returns stats across all chats.
 
         Returns:
-            Dictionary with feedback statistics
+            Dictionary with feedback statistics keyed by reaction emoji.
         """
-        if since is None:
-            # Default to today - show feedback on listings sent today
-            # Use listings.updated_at (when sent to Telegram) instead of feedback.first_seen_at
-            date_clause = "l.updated_at::date = CURRENT_DATE AND l.status = 'stage5_sent'"
-        else:
-            date_clause = f"l.updated_at::date = '{since.date()}' AND l.status = 'stage5_sent'"
+        self.conn.rollback()  # reset any aborted transaction from a prior query
 
+        if since is None:
+            date_expr = "CURRENT_DATE"
+        else:
+            date_expr = f"'{since.date()}'"
+
+        # Filter on listing_profiles for the correct per-chat send timestamp.
+        # For reactions: match by fb_id (not chat_id on feedback) because
+        # feedback.chat_id may be NULL for older rows recorded before the fix.
+        # We trust that if a listing was sent to this chat, its reactions belong here.
+        params: list = []
+
+        if chat_id is not None:
+            lp_filter = "lp.chat_id = %s AND lp.sent_at::date = " + date_expr
+            params.append(chat_id)
+        else:
+            lp_filter = "lp.sent_at::date = " + date_expr
+
+        # Use DISTINCT on fb_id inside aggregation to guard against double-counting
+        # if the same listing is ever sent to multiple chats in the future.
         query = f"""
             SELECT
                 f.reaction_type,
                 COUNT(DISTINCT f.telegram_message_id) as message_count,
                 SUM(f.reaction_count) as total_reactions,
-                json_agg(
+                json_agg(DISTINCT
                     json_build_object(
                         'fb_id', l.fb_id,
                         'listing_url', l.listing_url,
                         'title', l.title,
                         'reaction_count', f.reaction_count
-                    ) ORDER BY f.reaction_count DESC
+                    )
                 ) as listings
-            FROM listings l
-            LEFT JOIN feedback f ON l.fb_id = f.fb_id
-            WHERE {date_clause} AND f.reaction_type IS NOT NULL
+            FROM listing_profiles lp
+            JOIN listings l ON l.fb_id = lp.fb_id
+            JOIN feedback f ON f.fb_id = l.fb_id
+            WHERE {lp_filter}
+              AND f.reaction_type IS NOT NULL
             GROUP BY f.reaction_type
         """
 
         try:
-            self.cursor.execute(query)
+            self.cursor.execute(query, params if params else None)
             rows = self.cursor.fetchall()
 
+            # Note: Telegram sends ❤ (U+2764) without variation selector
             stats = {
-                '❤️': {'message_count': 0, 'total_reactions': 0, 'listings': []},
+                '❤': {'message_count': 0, 'total_reactions': 0, 'listings': []},
                 '💩': {'message_count': 0, 'total_reactions': 0, 'listings': []},
                 '🤡': {'message_count': 0, 'total_reactions': 0, 'listings': []}
             }
 
             for row in rows:
                 reaction_type, message_count, total_reactions, listings = row
-                stats[reaction_type] = {
-                    'message_count': message_count,
-                    'total_reactions': total_reactions,
-                    'listings': listings or []
-                }
+                if reaction_type in stats:
+                    stats[reaction_type] = {
+                        'message_count': message_count,
+                        'total_reactions': total_reactions,
+                        'listings': listings or []
+                    }
 
             return stats
         except Exception as e:
             logger.error(f"Error getting feedback stats: {e}")
+            self.conn.rollback()
             return {}
 
     def get_fb_id_by_message_id(self, telegram_message_id: int) -> Optional[str]:
         """
         Get fb_id by telegram_message_id.
+
+        Looks up in listing_profiles first (per-chat message_id, set by run_stage5),
+        then falls back to listings.telegram_message_id (legacy / single-chat path).
 
         Args:
             telegram_message_id: Telegram message ID
@@ -445,63 +522,283 @@ class Database:
         Returns:
             fb_id if found, None otherwise
         """
-        query = "SELECT fb_id FROM listings WHERE telegram_message_id = %s LIMIT 1"
+        query = """
+            SELECT fb_id FROM listing_profiles
+            WHERE telegram_message_id = %s
+            LIMIT 1
+        """
         try:
+            self.conn.rollback()  # reset any aborted transaction from a prior query
             self.cursor.execute(query, (telegram_message_id,))
+            result = self.cursor.fetchone()
+            if result:
+                return result[0]
+            # Fallback: listings table (legacy)
+            self.cursor.execute(
+                "SELECT fb_id FROM listings WHERE telegram_message_id = %s LIMIT 1",
+                (telegram_message_id,)
+            )
             result = self.cursor.fetchone()
             return result[0] if result else None
         except Exception as e:
             logger.error(f"Error getting fb_id by message_id {telegram_message_id}: {e}")
             return None
 
-    def get_favorite_listings(self, limit: int = 50) -> list:
+    def get_favorite_listings(self, limit: int = 50, chat_id: Optional[int] = None) -> list:
         """
-        Get all listings with ❤ reactions.
+        Get all listings with ❤ reactions, optionally filtered by chat_id.
 
-        Args:
-            limit: Maximum number of listings to return
-
-        Returns:
-            List of dicts with listing info
+        Filters by listing_profiles.chat_id (not feedback.chat_id) to correctly
+        attribute reactions to the chat that received the listing, even when
+        feedback.chat_id is NULL (older rows recorded before the fix).
         """
-        query = """
-            SELECT
-                l.fb_id,
-                l.title,
-                l.listing_url,
-                l.price,
-                l.location,
-                f.reaction_count,
-                f.first_seen_at,
-                l.updated_at as sent_at
-            FROM feedback f
-            INNER JOIN listings l ON f.fb_id = l.fb_id
-            WHERE f.reaction_type = '❤'
-            ORDER BY f.first_seen_at DESC
-            LIMIT %s
-        """
+        if chat_id is not None:
+            query = """
+                SELECT
+                    l.fb_id,
+                    l.title,
+                    l.listing_url,
+                    l.price,
+                    l.location,
+                    f.reaction_count,
+                    f.first_seen_at,
+                    lp.sent_at
+                FROM feedback f
+                JOIN listings l ON f.fb_id = l.fb_id
+                JOIN listing_profiles lp ON lp.fb_id = l.fb_id AND lp.chat_id = %s
+                WHERE f.reaction_type = '❤'
+                ORDER BY f.first_seen_at DESC
+                LIMIT %s
+            """
+            params = [chat_id, limit]
+        else:
+            query = """
+                SELECT
+                    l.fb_id,
+                    l.title,
+                    l.listing_url,
+                    l.price,
+                    l.location,
+                    f.reaction_count,
+                    f.first_seen_at,
+                    l.updated_at as sent_at
+                FROM feedback f
+                JOIN listings l ON f.fb_id = l.fb_id
+                WHERE f.reaction_type = '❤'
+                ORDER BY f.first_seen_at DESC
+                LIMIT %s
+            """
+            params = [limit]
         try:
-            self.cursor.execute(query, (limit,))
+            self.conn.rollback()  # reset any aborted transaction from a prior query
+            self.cursor.execute(query, params)
             rows = self.cursor.fetchall()
-
             favorites = []
             for row in rows:
                 fb_id, title, url, price, location, count, first_seen, sent_at = row
                 favorites.append({
-                    'fb_id': fb_id,
-                    'title': title,
-                    'url': url,
-                    'price': price,
-                    'location': location,
-                    'reaction_count': count,
-                    'first_seen_at': first_seen,
-                    'sent_at': sent_at
+                    'fb_id': fb_id, 'title': title, 'url': url,
+                    'price': price, 'location': location,
+                    'reaction_count': count, 'first_seen_at': first_seen, 'sent_at': sent_at
                 })
-
             return favorites
         except Exception as e:
             logger.error(f"Error getting favorite listings: {e}")
             return []
+
+    # ── Chat profiles ─────────────────────────────────────────────────────────
+
+    def register_chat(self, chat_id: int, name: str = '') -> bool:
+        """
+        Register a new chat as a pending profile (enabled=FALSE) if not already known.
+        Returns True if a new record was created, False if already exists.
+        """
+        query = """
+            INSERT INTO chat_profiles
+                (chat_id, name, enabled, bedrooms_min, price_max,
+                 allowed_locations, stop_locations, qfr_start_urls)
+            VALUES (%s, %s, FALSE, 1, 40000000, '[]', '[]', '[]')
+            ON CONFLICT (chat_id) DO NOTHING
+        """
+        try:
+            self.cursor.execute(query, (chat_id, name or f'chat_{chat_id}'))
+            self.conn.commit()
+            created = self.cursor.rowcount > 0
+            if created:
+                logger.info(f"Registered new pending chat profile: chat_id={chat_id}, name='{name}'")
+            return created
+        except Exception as e:
+            logger.error(f"Error registering chat {chat_id}: {e}")
+            self.conn.rollback()
+            return False
+
+    def sync_chat_profiles(self, profiles: list) -> None:
+        """Upsert chat_profiles from config into DB."""
+        import json as _json
+        query = """
+            INSERT INTO chat_profiles
+                (chat_id, name, enabled, bedrooms_min, bedrooms_max, price_max,
+                 allowed_locations, stop_locations, qfr_start_urls, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (chat_id) DO UPDATE SET
+                name             = EXCLUDED.name,
+                enabled          = EXCLUDED.enabled,
+                bedrooms_min     = EXCLUDED.bedrooms_min,
+                bedrooms_max     = EXCLUDED.bedrooms_max,
+                price_max        = EXCLUDED.price_max,
+                allowed_locations= EXCLUDED.allowed_locations,
+                stop_locations   = EXCLUDED.stop_locations,
+                qfr_start_urls   = EXCLUDED.qfr_start_urls,
+                updated_at       = NOW()
+        """
+        try:
+            for p in profiles:
+                self.cursor.execute(query, (
+                    p['chat_id'],
+                    p.get('name', ''),
+                    p.get('enabled', True),
+                    p['bedrooms_min'],
+                    p.get('bedrooms_max'),  # optional — None means no upper limit
+                    p['price_max'],
+                    _json.dumps(p.get('allowed_locations', [])),
+                    _json.dumps(p.get('stop_locations', [])),
+                    _json.dumps(p.get('qfr_start_urls', [])),
+                ))
+            self.conn.commit()
+            logger.info(f"Synced {len(profiles)} chat profiles to DB")
+        except Exception as e:
+            logger.error(f"Error syncing chat profiles: {e}")
+            self.conn.rollback()
+
+    def get_enabled_chat_profiles(self) -> list:
+        """Return all enabled profiles from chat_profiles."""
+        query = """
+            SELECT chat_id, name, bedrooms_min, bedrooms_max, price_max,
+                   allowed_locations, stop_locations, qfr_start_urls
+            FROM chat_profiles
+            WHERE enabled = TRUE
+            ORDER BY chat_id
+        """
+        try:
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+            profiles = []
+            for row in rows:
+                chat_id, name, br_min, br_max, price_max, allowed, stop, urls = row
+                profiles.append({
+                    'chat_id': chat_id, 'name': name,
+                    'bedrooms_min': br_min, 'bedrooms_max': br_max,
+                    'price_max': price_max,
+                    'allowed_locations': allowed or [],
+                    'stop_locations': stop or [],
+                    'qfr_start_urls': urls or [],
+                })
+            return profiles
+        except Exception as e:
+            logger.error(f"Error getting chat profiles: {e}")
+            return []
+
+    def get_chat_profile(self, chat_id: int) -> Optional[Dict]:
+        """Return a single profile by chat_id."""
+        query = """
+            SELECT chat_id, name, bedrooms_min, bedrooms_max, price_max,
+                   allowed_locations, stop_locations, qfr_start_urls
+            FROM chat_profiles WHERE chat_id = %s
+        """
+        try:
+            self.cursor.execute(query, (chat_id,))
+            row = self.cursor.fetchone()
+            if not row:
+                return None
+            chat_id, name, br_min, br_max, price_max, allowed, stop, urls = row
+            return {
+                'chat_id': chat_id, 'name': name,
+                'bedrooms_min': br_min, 'bedrooms_max': br_max,
+                'price_max': price_max,
+                'allowed_locations': allowed or [],
+                'stop_locations': stop or [],
+                'qfr_start_urls': urls or [],
+            }
+        except Exception as e:
+            logger.error(f"Error getting chat profile {chat_id}: {e}")
+            return None
+
+    # ── Listing profiles ──────────────────────────────────────────────────────
+
+    def get_listings_for_profile_check(self) -> list:
+        """
+        Return all listings that passed the global LLM gate (status IN stage3/stage4/stage5_sent)
+        so that _check_profile_criteria can be applied retroactively for any newly added profile.
+        """
+        query = """
+            SELECT fb_id, title, price_extracted, location, bedrooms, description
+            FROM listings
+            WHERE status IN ('stage3', 'stage4', 'stage5_sent')
+              AND llm_passed = TRUE
+        """
+        try:
+            self.cursor.execute(query)
+            columns = [desc[0] for desc in self.cursor.description]
+            return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error fetching listings for profile check: {e}")
+            return []
+
+    def upsert_listing_profile(self, fb_id: str, chat_id: int, passed: bool, reason: Optional[str] = None) -> None:
+        """INSERT or UPDATE a listing × profile result."""
+        query = """
+            INSERT INTO listing_profiles (fb_id, chat_id, passed, reason)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (fb_id, chat_id) DO UPDATE SET
+                passed = EXCLUDED.passed,
+                reason = EXCLUDED.reason
+        """
+        try:
+            self.cursor.execute(query, (fb_id, chat_id, passed, reason))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error upserting listing_profile ({fb_id}, {chat_id}): {e}")
+            self.conn.rollback()
+
+    def get_listings_for_chat(self, chat_id: int, batch_size: int = 10) -> list:
+        """Return pending (passed, not sent) listings for a specific chat."""
+        query = """
+            SELECT l.fb_id, l.title, l.price, l.price_extracted, l.location,
+                   l.listing_url, l.description, l.phone_number, l.bedrooms,
+                   l.has_pool, l.has_parking, l.has_wifi, l.has_ac,
+                   l.furniture, l.utilities, l.summary_ru, l.source,
+                   l.telegram_message_id, lp.id as lp_id
+            FROM listings l
+            JOIN listing_profiles lp ON l.fb_id = lp.fb_id
+            WHERE lp.chat_id = %s
+              AND lp.passed = TRUE
+              AND lp.sent_at IS NULL
+              AND l.status IN ('stage4', 'stage5_sent')
+            ORDER BY l.created_at ASC
+            LIMIT %s
+        """
+        try:
+            self.cursor.execute(query, (chat_id, batch_size))
+            columns = [desc[0] for desc in self.cursor.description]
+            rows = self.cursor.fetchall()
+            return [dict(zip(columns, row)) for row in rows]
+        except Exception as e:
+            logger.error(f"Error getting listings for chat {chat_id}: {e}")
+            return []
+
+    def mark_profile_sent(self, fb_id: str, chat_id: int, telegram_message_id: int) -> None:
+        """Mark a listing as sent for a specific chat profile."""
+        query = """
+            UPDATE listing_profiles
+            SET sent_at = NOW(), telegram_message_id = %s
+            WHERE fb_id = %s AND chat_id = %s
+        """
+        try:
+            self.cursor.execute(query, (telegram_message_id, fb_id, chat_id))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Error marking profile sent ({fb_id}, {chat_id}): {e}")
+            self.conn.rollback()
 
     def __enter__(self):
         """Context manager entry."""

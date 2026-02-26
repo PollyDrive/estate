@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """
-STAGE 2: Manual full detail scraping with memo23/facebook-marketplace-cheerio
-Takes candidates from the main 'listings' table with status 'stage1_new',
-scrapes full details, and updates them with the results and a new status.
+STAGE 2: Filter and enrich group-scraped listings.
+
+Takes listings with status 'stage1' / 'stage1_new':
+  - facebook_group with description  → apply GLOBAL filters, advance to 'stage2' or 'stage2_failed'
+  - facebook_group without description → mark 'no_description'
+  - marketplace / apify sources      → return to 'stage1' (handled by stage2_qfr, not here)
+
+Filtering logic (GLOBAL only — no per-profile criteria here):
+  - stop_words / stop_words_detailed (land, kos, room-only, construction, US markers…)
+  - stop_locations checked against BOTH location field AND description text
+  Profile-specific filtering (bedrooms, price, allowed_locations) happens in stage4 --chat.
 """
 
 import os
+import re
 import sys
 import logging
-import re
 from pathlib import Path
 from dotenv import load_dotenv
-import json
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from database import Database
 from property_parser import PropertyParser
-from facebook_marketplace_cheerio_scraper import FacebookMarketplaceCheerioScraper
+from config_loader import load_config
 
 # Setup logging
 logging.basicConfig(
@@ -26,328 +33,214 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('logs/stage2_manual.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.StreamHandler(sys.stdout),
+    ],
 )
-
 logger = logging.getLogger(__name__)
 
-SUSPICIOUS_TITLE_PATTERNS = [
-    (r"\bprivate\s+room\b", "private_room"),
-    (r"\broom\s+for\s+rent\b", "room_for_rent"),
-    (r"\bwarung\b", "warung"),
-    (r"\bkuliner\b", "kuliner"),
-    (r"\bstand\s+kuliner\b", "stand_kuliner"),
-    (r"\btoko\b", "toko"),
-    (r"\bruko\b", "ruko"),
-    (r"\bkost\b", "kost"),
-    (r"\bboarding\b", "boarding"),
-    (r"\boffice\b", "office"),
-]
 
-
-def _suspicious_title_reason(title: str) -> str | None:
-    t = (title or "").lower()
-    for pattern, label in SUSPICIOUS_TITLE_PATTERNS:
-        if re.search(pattern, t):
-            return label
+def _check_stop_locations(text: str, stop_locations: list[str]) -> str | None:
+    """
+    Return the first stop_location found in text, or None.
+    Short tokens (≤3 chars: NJ, CA, FL) require word boundaries to avoid
+    false positives (e.g. 'CA' inside 'Canggu').
+    """
+    text_lower = text.lower()
+    for loc in stop_locations:
+        loc_lower = loc.lower()
+        if len(loc_lower) <= 3:
+            if re.search(r'\b' + re.escape(loc_lower) + r'\b', text_lower):
+                return loc
+        else:
+            if loc_lower in text_lower:
+                return loc
     return None
 
+
 def main():
-    """Run Stage 2: Full detail scraping for candidates"""
-    
+    """Run Stage 2: Filter group listings, return marketplace to stage1."""
+
     logger.info("=" * 80)
-    logger.info("STAGE 2: Manual Full Detail Scraping (Refactored)")
+    logger.info("STAGE 2: Group Listing Filter")
     logger.info("=" * 80)
-    
-    # Load environment
+
     load_dotenv()
-    
-    # Load config
-    config_path = Path(__file__).parent.parent / 'config' / 'config.json'
-    if not config_path.exists():
-        config_path = Path('/app/config/config.json')
-    
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    
-    # Get credentials
+    config = load_config()
+
     db_url = os.getenv('DATABASE_URL')
-    apify_key = os.getenv('APIFY_API_KEY')
-    
-    if not all([db_url, apify_key]):
-        logger.error("Missing required environment variables (DATABASE_URL, APIFY_API_KEY)!")
+    if not db_url:
+        logger.error("Missing DATABASE_URL!")
         sys.exit(1)
-    
-    # Initialize components
+
     parser = PropertyParser(config)
-    cheerio_scraper = FacebookMarketplaceCheerioScraper(apify_key, config)
-    
-    # Get unprocessed candidates from DB
+
+    # ── Global filters (no profiles needed here) ─────────────────────────────
+    filters_cfg = config.get('filters', {})
+    global_stop_words          = [w.lower() for w in (filters_cfg.get('stop_words') or [])]
+    global_stop_words_detailed = [w.lower() for w in (filters_cfg.get('stop_words_detailed') or [])]
+    global_stop_locations      = [loc for loc in (filters_cfg.get('stop_locations') or [])]
+    logger.info(f"Global filters: {len(global_stop_words)} stop_words, "
+                f"{len(global_stop_words_detailed)} stop_words_detailed, "
+                f"{len(global_stop_locations)} stop_locations")
+
+    # ── Fetch stage1 listings ────────────────────────────────────────────────
     with Database() as db:
-        # Get all stage1 listings
-        query = "SELECT fb_id, title, listing_url, source, description FROM listings WHERE status IN ('stage1', 'stage1_new') ORDER BY created_at DESC"
-        db.cursor.execute(query)
-        columns = [desc[0] for desc in db.cursor.description]
-        listings_to_process = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
-    
-    if not listings_to_process:
-        logger.warning("No new listings with status 'stage1' or 'stage1_new' found.")
+        db.cursor.execute(
+            "SELECT fb_id, title, listing_url, source, description "
+            "FROM listings WHERE status IN ('stage1', 'stage1_new') ORDER BY created_at DESC"
+        )
+        columns = [d[0] for d in db.cursor.description]
+        all_listings = [dict(zip(columns, row)) for row in db.cursor.fetchall()]
+
+    if not all_listings:
+        logger.warning("No listings with status 'stage1' or 'stage1_new'.")
         sys.exit(0)
-    
-    logger.info(f"Found {len(listings_to_process)} listings to process.")
-    
-    # Separate Groups with description vs. those needing scraping
-    groups_with_description = [l for l in listings_to_process if l['source'] == 'facebook_group' and l.get('description')]
-    groups_no_description = [l for l in listings_to_process if l['source'] == 'facebook_group' and not l.get('description')]
-    marketplace_listings = [l for l in listings_to_process if l['source'] in ('marketplace', 'apify', 'apify-marketplace', None, '')]
-    
-    logger.info(f"  Groups with description: {len(groups_with_description)}")
-    logger.info(f"  Groups without description: {len(groups_no_description)}")
-    logger.info(f"  Marketplace listings: {len(marketplace_listings)}")
-    
-    # Pre-clean stage1 marketplace queue before spending Cheerio credits.
-    criterias = config.get('criterias', {})
-    candidate_urls = []
-    prefiltered_rejected = 0
-    seen_urls = set()
+
+    logger.info(f"Found {len(all_listings)} listings to process.")
+
+    # Bucket by source
+    groups_with_desc    = [l for l in all_listings
+                           if l['source'] == 'facebook_group' and l.get('description')]
+    groups_no_desc      = [l for l in all_listings
+                           if l['source'] == 'facebook_group' and not l.get('description')]
+    marketplace_listings = [l for l in all_listings
+                            if l['source'] not in ('facebook_group',)]
+
+    logger.info(f"  Groups with description:    {len(groups_with_desc)}")
+    logger.info(f"  Groups without description: {len(groups_no_desc)}")
+    logger.info(f"  Marketplace (return→stage1): {len(marketplace_listings)}")
+
+    processed = passed_count = failed_count = no_desc_count = returned_count = 0
+
     with Database() as db:
-        for listing in marketplace_listings:
-            fb_id = listing.get('fb_id')
-            title = listing.get('title') or ''
-            listing_url = (listing.get('listing_url') or '').strip()
 
-            if not listing_url or '/marketplace/item/' not in listing_url:
+        # ── Marketplace: return to stage1 so stage2_qfr picks them up ──────
+        if marketplace_listings:
+            logger.info(f"\nReturning {len(marketplace_listings)} marketplace listings to 'stage1'...")
+            for listing in marketplace_listings:
+                fb_id = listing['fb_id']
                 db.cursor.execute(
-                    """
-                    UPDATE listings
-                    SET status = 'stage2_failed',
-                        pass_reason = %s,
-                        updated_at = NOW()
-                    WHERE fb_id = %s AND status IN ('stage1', 'stage1_new')
-                    """,
-                    ("Pre-Cheerio reject: invalid marketplace item URL", fb_id),
+                    "UPDATE listings SET status = 'stage1', pass_reason = NULL, updated_at = NOW() "
+                    "WHERE fb_id = %s",
+                    (fb_id,)
                 )
-                prefiltered_rejected += db.cursor.rowcount
-                continue
-
-            suspicious = _suspicious_title_reason(title)
-            if suspicious:
-                db.cursor.execute(
-                    """
-                    UPDATE listings
-                    SET status = 'stage2_failed',
-                        pass_reason = %s,
-                        updated_at = NOW()
-                    WHERE fb_id = %s AND status IN ('stage1', 'stage1_new')
-                    """,
-                    (f"Pre-Cheerio reject: suspicious title ({suspicious})", fb_id),
-                )
-                prefiltered_rejected += db.cursor.rowcount
-                continue
-
-            title_params = parser.parse(title)
-            title_ok, title_reason = parser.matches_criteria(title_params, criterias, stage=1)
-            if not title_ok:
-                db.cursor.execute(
-                    """
-                    UPDATE listings
-                    SET status = 'stage2_failed',
-                        pass_reason = %s,
-                        bedrooms = %s,
-                        price_extracted = %s,
-                        updated_at = NOW()
-                    WHERE fb_id = %s AND status IN ('stage1', 'stage1_new')
-                    """,
-                    (
-                        f"Pre-Cheerio title filter: {title_reason}",
-                        title_params.get('bedrooms'),
-                        title_params.get('price'),
-                        fb_id,
-                    ),
-                )
-                prefiltered_rejected += db.cursor.rowcount
-                continue
-
-            if listing_url not in seen_urls:
-                seen_urls.add(listing_url)
-                candidate_urls.append(listing_url)
-
-        db.conn.commit()
-
-    logger.info(
-        "Pre-Cheerio cleanup: rejected=%s, remaining candidates=%s",
-        prefiltered_rejected,
-        len(candidate_urls),
-    )
-    
-    # STAGE 2: Scrape full details for marketplace
-    stage2_listings = []
-    if candidate_urls:
-        max_stage2 = config.get('marketplace_cheerio', {}).get('max_stage2_items', 50)
-        logger.info(f"Scraping full details for marketplace (max {max_stage2} items)...")
-        
-        try:
-            stage2_listings = cheerio_scraper.scrape_full_details(candidate_urls, max_stage2_items=max_stage2)
-            logger.info(f"✓ Scraped {len(stage2_listings)} full listings")
-        except Exception as e:
-            logger.error(f"✗ Error scraping: {e}", exc_info=True)
-            # Don't exit, continue processing groups
-    
-    # Load detailed stop words
-    stop_words_detailed = config.get('filters', {}).get('stop_words_detailed', [])
-    stop_words_detailed_lower = [word.lower() for word in stop_words_detailed]
-    
-    logger.info(f"Loaded {len(stop_words_detailed)} detailed stop words for Stage 2")
-    
-    # Process and save
-    logger.info("Processing and updating full listings in the database...")
-    
-    processed_count = 0
-    updated_count = 0
-    
-    with Database() as db:
-        for listing_details in stage2_listings:
-            processed_count += 1
-            
-            fb_id = listing_details.get('fb_id')
-            if not fb_id:
-                logger.warning(f"Scraped listing missing fb_id, skipping.")
-                continue
-            
-            description = listing_details.get('description', '')
-            
-            # Check for detailed stop words in description
-            found_detailed_stop_word = None
-            if description and stop_words_detailed_lower:
-                description_lower = description.lower()
-                for stop_word in stop_words_detailed_lower:
-                    if stop_word in description_lower:
-                        found_detailed_stop_word = stop_word
-                        break
-            
-            # Determine status
-            if found_detailed_stop_word:
-                new_status = 'stage2_failed'
-                logger.info(f"  ✗ REJECTED {fb_id}: Detailed stop word '{found_detailed_stop_word}' found")
-            else:
-                # Parse ONLY from description (title can be incorrect/outdated)
-                params = parser.parse(description)
-                
-                # Final criteria check with Stage 2 filters (strict bedrooms >= 4)
-                passed, reason = parser.matches_criteria(params, criterias, stage=2)
-                
-                new_status = 'stage2' if passed else 'stage2_failed'
-                logger.info(f"Processing {fb_id}: Status '{new_status}'. Reason: {reason}")
-
-            # Extract location from description
-            location_extracted = parser.extract_location(description) if description else None
-            
-            # Prepare details for DB update
-            update_details = {
-                'description': description,
-                'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
-                'bedrooms': params.get('bedrooms') if 'params' in locals() else None,
-                'price_extracted': params.get('price') if 'params' in locals() else None,
-                'has_ac': params.get('has_ac', False) if 'params' in locals() else False,
-                'has_wifi': params.get('has_wifi', False) if 'params' in locals() else False,
-                'has_pool': params.get('has_pool', False) if 'params' in locals() else False,
-                'has_parking': params.get('has_parking', False) if 'params' in locals() else False,
-                'utilities': params.get('utilities') if 'params' in locals() else None,
-                'furniture': params.get('furniture') if 'params' in locals() else None,
-                'rental_term': params.get('rental_term') if 'params' in locals() else None,
-                'location_extracted': location_extracted,
-                'status': new_status
-            }
-            
-            # Update in database
-            set_clause = ", ".join([f"{key} = %s" for key in update_details.keys()])
-            query = f"UPDATE listings SET {set_clause} WHERE fb_id = %s"
-            values = list(update_details.values())
-            values.append(fb_id)
-            
-            db.cursor.execute(query, tuple(values))
+                returned_count += 1
             db.conn.commit()
-            updated_count += 1
-            
-        # Process Groups with description (already have it, just apply filters)
-        logger.info(f"\nProcessing {len(groups_with_description)} Groups with existing description...")
-        for listing in groups_with_description:
-            processed_count += 1
+            logger.info(f"  ✓ Returned {returned_count} marketplace listings to 'stage1'")
+
+        # ── Groups without description ───────────────────────────────────────
+        if groups_no_desc:
+            logger.info(f"\nMarking {len(groups_no_desc)} groups without description...")
+            for listing in groups_no_desc:
+                db.cursor.execute(
+                    "UPDATE listings SET status = 'no_description', updated_at = NOW() WHERE fb_id = %s",
+                    (listing['fb_id'],)
+                )
+                no_desc_count += 1
+            db.conn.commit()
+
+        # ── Groups with description: full filter pipeline ────────────────────
+        logger.info(f"\nProcessing {len(groups_with_desc)} groups with description...")
+
+        for listing in groups_with_desc:
+            processed += 1
             fb_id = listing['fb_id']
-            description = listing['description']
-            params = {}
-            
-            # Extract title and location from description for groups
+            description = listing.get('description') or ''
+
+            # Parse structured fields from title + description combined so that
+            # bedroom counts embedded in the title ("3 Beds 3 Baths House",
+            # "Four bedroom villa") are captured even when description is vague.
+            title_text = listing.get('title') or ''
+            parse_text = f"{title_text} {description}".strip()
+            params = parser.parse(parse_text)
+            bedrooms      = params.get('bedrooms')
+            price_extracted = params.get('price')
+            location      = parser.extract_location(description) or ''
             extracted_title = parser.extract_title_from_description(description, max_length=150)
-            location_extracted = parser.extract_location(description) if description else None
-            
-            # Check for detailed stop words in description
-            found_detailed_stop_word = None
-            if description and stop_words_detailed_lower:
-                description_lower = description.lower()
-                for stop_word in stop_words_detailed_lower:
-                    if stop_word in description_lower:
-                        found_detailed_stop_word = stop_word
-                        break
-            
-            # Determine status
-            if found_detailed_stop_word:
-                new_status = 'stage2_failed'
-                logger.info(f"  ✗ REJECTED {fb_id}: Detailed stop word '{found_detailed_stop_word}' found")
+            phone         = (parser.extract_phone_numbers(description) or [None])[0]
+
+            new_status = 'stage2'
+            reason     = None
+            full_text  = f"{title_text} {description}".lower()
+
+            # 1. Global stop_words (title+description combined).
+            #    stop_words are also checked at stage1 on title alone — here we
+            #    catch patterns that only appear in the full description.
+            if new_status == 'stage2' and global_stop_words:
+                hit = next((w for w in global_stop_words if w in full_text), None)
+                if hit:
+                    new_status = 'stage2_failed'
+                    reason = f"stop_word: '{hit}'"
+                    logger.info(f"  ✗ {fb_id}: {reason}")
+
+            # 2. Global stop_words_detailed (longer lease-term patterns)
+            if new_status == 'stage2' and global_stop_words_detailed:
+                hit = next((w for w in global_stop_words_detailed if w in full_text), None)
+                if hit:
+                    new_status = 'stage2_failed'
+                    reason = f"stop_word_detailed: '{hit}'"
+                    logger.info(f"  ✗ {fb_id}: {reason}")
+
+            # 3. Global stop_locations — checked against BOTH location field AND
+            #    full description so listings like "apartment in New York" with
+            #    empty location field are still caught.
+            if new_status == 'stage2' and global_stop_locations:
+                search_for_loc = f"{location} {description}"
+                hit = _check_stop_locations(search_for_loc, global_stop_locations)
+                if hit:
+                    new_status = 'stage2_failed'
+                    reason = f"stop_location: '{hit}'"
+                    logger.info(f"  ✗ {fb_id}: {reason}")
+
+            if new_status == 'stage2':
+                logger.info(f"  ✓ {fb_id}: passed global filters")
+
+            if new_status == 'stage2':
+                passed_count += 1
             else:
-                # Parse ONLY from description (title can be incorrect/outdated)
-                params = parser.parse(description)
-                
-                # Final criteria check with Stage 2 filters (strict bedrooms >= 4)
-                passed, reason = parser.matches_criteria(params, criterias, stage=2)
-                
-                new_status = 'stage2' if passed else 'stage2_failed'
-                logger.info(f"  Processing {fb_id}: Status '{new_status}'. Reason: {reason}")
-            
-            # Prepare details for DB update
-            update_details = {
-                'title': extracted_title,  # Extract title from description
-                'phone_number': (parser.extract_phone_numbers(description) or [None])[0],
-                'bedrooms': params.get('bedrooms') if 'params' in locals() else None,
-                'price_extracted': params.get('price') if 'params' in locals() else None,
-                'has_ac': params.get('has_ac', False) if 'params' in locals() else False,
-                'has_wifi': params.get('has_wifi', False) if 'params' in locals() else False,
-                'location_extracted': location_extracted,
-                'status': new_status
-            }
-            
-            # Update in database
-            set_clause = ", ".join([f"{key} = %s" for key in update_details.keys()])
-            query = f"UPDATE listings SET {set_clause} WHERE fb_id = %s"
-            values = list(update_details.values())
-            values.append(fb_id)
-            
-            db.cursor.execute(query, tuple(values))
+                failed_count += 1
+
+            # Update listing with parsed fields + new status
+            db.cursor.execute(
+                """
+                UPDATE listings SET
+                    title            = COALESCE(NULLIF(%s, ''), title),
+                    phone_number     = COALESCE(%s, phone_number),
+                    bedrooms         = COALESCE(%s, bedrooms),
+                    price_extracted  = COALESCE(%s, price_extracted),
+                    has_ac           = %s,
+                    has_wifi         = %s,
+                    location         = COALESCE(NULLIF(%s, ''), location),
+                    status           = %s,
+                    pass_reason      = %s,
+                    updated_at       = NOW()
+                WHERE fb_id = %s
+                """,
+                (
+                    extracted_title,
+                    phone,
+                    bedrooms,
+                    price_extracted,
+                    params.get('has_ac', False),
+                    params.get('has_wifi', False),
+                    location,
+                    new_status,
+                    reason if new_status == 'stage2_failed' else None,
+                    fb_id,
+                )
+            )
             db.conn.commit()
-            updated_count += 1
-        
-        # Process Groups without description
-        logger.info(f"\nProcessing {len(groups_no_description)} Groups without description...")
-        for listing in groups_no_description:
-            processed_count += 1
-            fb_id = listing['fb_id']
-            new_status = 'no_description'
-            logger.info(f"  ⚠ NO_DESC {fb_id}: Marked as 'no_description'")
-            
-            db.cursor.execute("UPDATE listings SET status = %s WHERE fb_id = %s", (new_status, fb_id))
-            db.conn.commit()
-            updated_count += 1
-    
-    # Summary
+
+    # ── Summary ──────────────────────────────────────────────────────────────
     logger.info("=" * 80)
     logger.info("STAGE 2 COMPLETE")
-    logger.info(f"Processed: {processed_count}")
-    logger.info(f"Updated in DB: {updated_count}")
-    logger.info(f"  - Marketplace scraped: {len(stage2_listings)}")
-    logger.info(f"  - Groups with description: {len(groups_with_description)}")
-    logger.info(f"  - Groups without description (no_description): {len(groups_no_description)}")
+    logger.info(f"  Groups processed:          {processed}")
+    logger.info(f"    → stage2 (passed):       {passed_count}")
+    logger.info(f"    → stage2_failed:         {failed_count}")
+    logger.info(f"    → no_description:        {no_desc_count}")
+    logger.info(f"  Marketplace → stage1:      {returned_count}")
     logger.info("=" * 80)
+
 
 if __name__ == '__main__':
     main()
